@@ -10,6 +10,49 @@
 > **当前仓库是安全开发基线，不是可投入生产的 VPN。**  
 > 现阶段不会创建 UDP 数据通道、TUN 设备、系统路由、防火墙或 NAT 规则，也不会转发真实流量。“填写服务器 IP 即可连接”是产品目标交互；当前版本用于验证协议组件、控制面、客户端界面与安全边界。
 
+## 一键安装脚本
+
+以下命令安装的是当前安全开发版。安装脚本只负责下载、构建和启动开发组件，不会建立真实 VPN，也不会修改系统 DNS、路由、防火墙或 NAT。
+
+### macOS / Linux（curl）
+
+~~~sh
+curl -fsSL https://raw.githubusercontent.com/Aiweline/WG/main/scripts/wg-server | sh -s -- install 203.0.113.10 --dry-run
+~~~
+
+### macOS（Homebrew）
+
+~~~sh
+brew tap aiweline/wg https://github.com/Aiweline/WG
+brew install wg
+wg install --server-ip 203.0.113.10 --dry-run
+~~~
+
+### Linux（服务器一键安装）
+
+~~~sh
+curl -fsSL https://raw.githubusercontent.com/Aiweline/WG/main/scripts/wg-server | sh -s -- install 203.0.113.10 --dry-run
+~~~
+
+### Windows（PowerShell）
+
+~~~powershell
+git clone https://github.com/Aiweline/WG.git
+Set-Location WG
+wsl bash ./scripts/wg-client install 203.0.113.10 ./wg-pairing.wgp --dry-run
+~~~
+
+### Docker（开发安全模式）
+
+~~~sh
+docker run --rm -p 127.0.0.1:4173:4173 \\
+  ghcr.io/aiweline/wg:dev-safe client \\
+  --dev-safe --no-host-network --endpoint 203.0.113.10:47001
+~~~
+
+> [!NOTE]
+> Homebrew tap 和 GHCR 镜像是发布渠道约定，当前仓库可直接使用的是 `scripts/wg-client` 与 `scripts/wg-server`；在正式发行前请校验签名和版本。`203.0.113.10` 是文档示例地址，不能作为生产服务器地址。
+
 ## 核心特点
 
 - **智能分流**：<code>AUTO</code> 自动判断目标，也可以显式设为 <code>TUNNEL</code>、<code>DIRECT</code> 或 <code>BLOCK</code>。
@@ -169,4 +212,3 @@ sh -n scripts/wg-server
 欢迎提交 Issue 和 Pull Request。请保持安全开发模式为默认值，为行为变化补充测试，并在提交前运行全部验证命令。
 
 涉及协议、密码、重放防护、分流、DNS 或系统网络设置的变更，请说明兼容性、安全影响与验证依据。
-
