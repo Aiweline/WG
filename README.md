@@ -12,26 +12,22 @@
 
 ## 一键安装脚本
 
-以下命令安装的是当前安全开发版。安装脚本只负责下载、构建和启动开发组件，不会建立真实 VPN，也不会修改系统 DNS、路由、防火墙或 NAT。
+以下命令均为安全开发模式的 dry-run 示例，不会创建真实 VPN、修改系统 DNS 或系统路由。
 
-### macOS / Linux（curl）
+### macOS / Linux 客户端
 
 ~~~sh
-curl -fsSL https://raw.githubusercontent.com/Aiweline/WG/main/scripts/wg-server | sh -s -- install 203.0.113.10 --dry-run
+curl -fsSLO https://raw.githubusercontent.com/Aiweline/WG/main/scripts/wg-client
+chmod +x ./wg-client
+./wg-client install 203.0.113.10 ./wg-pairing.wgp --dry-run
 ~~~
 
-### macOS（Homebrew）
+### Linux 服务端
 
 ~~~sh
-brew tap aiweline/wg https://github.com/Aiweline/WG
-brew install wg
-wg install --server-ip 203.0.113.10 --dry-run
-~~~
-
-### Linux（服务器一键安装）
-
-~~~sh
-curl -fsSL https://raw.githubusercontent.com/Aiweline/WG/main/scripts/wg-server | sh -s -- install 203.0.113.10 --dry-run
+curl -fsSLO https://raw.githubusercontent.com/Aiweline/WG/main/scripts/wg-server
+chmod +x ./wg-server
+./wg-server install 203.0.113.10 --dry-run
 ~~~
 
 ### Windows（PowerShell）
@@ -42,16 +38,7 @@ Set-Location WG
 wsl bash ./scripts/wg-client install 203.0.113.10 ./wg-pairing.wgp --dry-run
 ~~~
 
-### Docker（开发安全模式）
-
-~~~sh
-docker run --rm -p 127.0.0.1:4173:4173 \\
-  ghcr.io/aiweline/wg:dev-safe client \\
-  --dev-safe --no-host-network --endpoint 203.0.113.10:47001
-~~~
-
-> [!NOTE]
-> Homebrew tap 和 GHCR 镜像是发布渠道约定，当前仓库可直接使用的是 `scripts/wg-client` 与 `scripts/wg-server`；在正式发行前请校验签名和版本。`203.0.113.10` 是文档示例地址，不能作为生产服务器地址。
+> 生产安装尚未完成；`install --execute` 会明确失败。请不要把上述示例用于生产网络。
 
 ## 核心特点
 
