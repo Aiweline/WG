@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "manual-docs-tunnel",
+      "target": "docs.example.com",
+      "target_type": "domain",
+      "result": "TUNNEL",
+      "source": "manual",
+      "expires_at": null
+    },
+    {
+      "id": "learned-api-direct",
+      "target": "198.51.100.24",
+      "target_type": "ip",
+      "result": "DIRECT",
+      "source": "automatic-learning",
+      "expires_at": "2026-07-23T12:00:00Z"
+    }
+  ],
+  "deletion_behavior": "Deleting a rule removes the override and returns the target to AUTO evaluation."
+}

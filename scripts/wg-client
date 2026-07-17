@@ -1,0 +1,778 @@
+#!/bin/sh
+
+# WG client developer orchestration. Network and DNS changes belong to a future
+# audited Go implementation; this script only manages local dev state/API calls.
+set -eu
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+
+SCRIPT_DIR=$(CDPATH= cd -P "$(dirname "$0")" && pwd)
+ROOT_DIR=$(CDPATH= cd -P "$SCRIPT_DIR/.." && pwd)
+STATE_DIR="$ROOT_DIR/.wg-dev/client"
+PID_FILE="$STATE_DIR/wg-client.pid"
+LOG_FILE="$STATE_DIR/wg-client.log"
+
+CLIENT_BIN=${WG_CLIENT_BIN:-bin/wg-core}
+case "$CLIENT_BIN" in
+    /*) ;;
+    *) CLIENT_BIN="$ROOT_DIR/$CLIENT_BIN" ;;
+esac
+
+CLIENT_MANAGEMENT_ADDR=${WG_CLIENT_MANAGEMENT_ADDR:-127.0.0.1:47003}
+
+die() {
+    printf 'wg-client: %s\n' "$*" >&2
+    exit 2
+}
+
+print_help() {
+    cat <<'EOF'
+WG client developer script
+
+Usage:
+  wg-client help
+  wg-client install SERVER_IP [PAIRING_FILE] [--headless] [--dry-run|--execute]
+  wg-client start [--dry-run|--execute]
+  wg-client stop [--dry-run|--execute]
+  wg-client status
+  wg-client logs [--follow]
+  wg-client pair --server IP --file FILE --fingerprint VALUE \
+                 --confirm-fingerprint --confirm-authorization \
+                 [--dry-run|--execute]
+  wg-client split list [--action tunnel|direct|block] [--source user|auto] \
+                       [--dry-run|--execute]
+  wg-client split explain DOMAIN_OR_IP_OR_CIDR [--dry-run|--execute]
+  wg-client split set tunnel|direct|block DOMAIN_OR_IP_OR_CIDR \
+                      [--expires RFC3339] [--dry-run|--execute]
+  wg-client split delete DOMAIN_OR_IP_OR_CIDR [--dry-run|--execute]
+  wg-client rules list [--dry-run|--execute]
+  wg-client rules add --target DOMAIN_OR_IP --result TUNNEL|DIRECT|BLOCK \
+                      [--expires RFC3339] [--dry-run|--execute]
+  wg-client rules delete RULE_ID [--dry-run|--execute]
+  wg-client diagnose [--dry-run|--execute]
+  wg-client update [check|apply|rollback] [--dry-run|--execute]
+  wg-client doctor [--dry-run|--execute]
+  wg-client upgrade [--dry-run|--execute]
+  wg-client rollback [--dry-run|--execute]
+  wg-client uninstall [--purge] [--dry-run|--execute]
+
+Safety model:
+  --dry-run is the default for commands that can change local state.
+  install --execute always fails closed: production installation is not built.
+  API execution is restricted to http://127.0.0.1:<port>/api/v1.
+  This script never changes system DNS, routes, firewall, or system services.
+
+Environment:
+  WG_CLIENT_BIN              Project-local Go binary (default: bin/wg-core)
+  WG_CLIENT_MANAGEMENT_ADDR  Loopback management address (default: 127.0.0.1:47003)
+EOF
+}
+
+validate_project_binary() {
+    case "$CLIENT_BIN" in
+        "$ROOT_DIR"/*) ;;
+        *) die "WG_CLIENT_BIN must resolve inside $ROOT_DIR" ;;
+    esac
+}
+
+validate_loopback_address() {
+    loopback_value=$1
+    case "$loopback_value" in
+        127.0.0.1:*) loopback_port=${loopback_value#127.0.0.1:} ;;
+        *) die "management address must use 127.0.0.1, got: $loopback_value" ;;
+    esac
+    case "$loopback_port" in
+        ''|*[!0-9]*) die "management port must be numeric" ;;
+    esac
+    if [ "$loopback_port" -lt 1 ] || [ "$loopback_port" -gt 65535 ]; then
+        die "management port must be between 1 and 65535"
+    fi
+    API_BASE="http://$loopback_value/api/v1"
+}
+
+validate_server_ip() {
+    pair_server_value=$1
+    case "$pair_server_value" in
+        ''|*[!0-9A-Fa-f:.]*) die "server IP contains unsupported characters" ;;
+    esac
+    case "$pair_server_value" in
+        *.*|*:*) ;;
+        *) die "server IP does not look like IPv4 or IPv6" ;;
+    esac
+}
+
+read_pid() {
+    [ -f "$PID_FILE" ] || return 1
+    IFS= read -r client_pid < "$PID_FILE" || return 1
+    case "$client_pid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    return 0
+}
+
+process_matches() {
+    process_pid=$1
+    process_command=$(ps -p "$process_pid" -o command= 2>/dev/null || :)
+    case "$process_command" in
+        *"$CLIENT_BIN"*) ;;
+        *) return 1 ;;
+    esac
+    case "$process_command" in
+        *"--wg-dev-instance=client"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+parse_execute_flag() {
+    CLIENT_EXECUTE=0
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --dry-run) CLIENT_EXECUTE=0 ;;
+            --execute) CLIENT_EXECUTE=1 ;;
+            *) die "unknown option: $1" ;;
+        esac
+        shift
+    done
+}
+
+require_curl() {
+    command -v curl >/dev/null 2>&1 || die "curl is required to call the local management API"
+}
+
+api_simple() {
+    api_method=$1
+    api_path=$2
+    if [ "$CLIENT_EXECUTE" -eq 0 ]; then
+        printf 'DRY-RUN: %s %s%s\n' "$api_method" "$API_BASE" "$api_path"
+        return 0
+    fi
+    require_curl
+    curl --fail --silent --show-error \
+        --noproxy '*' \
+        --connect-timeout 2 \
+        --max-time 15 \
+        -X "$api_method" \
+        -H 'Accept: application/json' \
+        "$API_BASE$api_path"
+    printf '\n'
+}
+
+api_form() {
+    api_method=$1
+    api_path=$2
+    shift 2
+    if [ "$CLIENT_EXECUTE" -eq 0 ]; then
+        printf 'DRY-RUN: %s %s%s (form values validated; body omitted)\n' "$api_method" "$API_BASE" "$api_path"
+        return 0
+    fi
+    require_curl
+    curl --fail --silent --show-error \
+        --noproxy '*' \
+        --connect-timeout 2 \
+        --max-time 15 \
+        -X "$api_method" \
+        -H 'Accept: application/json' \
+        "$@" \
+        "$API_BASE$api_path"
+    printf '\n'
+}
+
+make_operation_id() {
+    operation_id="cli-$(date +%s)-$$"
+}
+
+api_json() {
+    api_method=$1
+    api_path=$2
+    api_body=$3
+    if [ "$CLIENT_EXECUTE" -eq 0 ]; then
+        printf 'DRY-RUN: %s %s%s (validated JSON body omitted)\n' "$api_method" "$API_BASE" "$api_path"
+        return 0
+    fi
+    require_curl
+    curl --fail --silent --show-error \
+        --noproxy '*' \
+        --connect-timeout 2 \
+        --max-time 15 \
+        -X "$api_method" \
+        -H 'Accept: application/json' \
+        -H 'Content-Type: application/json' \
+        --data "$api_body" \
+        "$API_BASE$api_path"
+    printf '\n'
+}
+
+api_json_capture() {
+    api_method=$1
+    api_path=$2
+    api_body=$3
+    require_curl
+    curl --fail --silent --show-error \
+        --noproxy '*' \
+        --connect-timeout 2 \
+        --max-time 15 \
+        -X "$api_method" \
+        -H 'Accept: application/json' \
+        -H 'Content-Type: application/json' \
+        --data "$api_body" \
+        "$API_BASE$api_path"
+}
+
+json_string_field() {
+    json_document=$1
+    json_field=$2
+    printf '%s\n' "$json_document" | sed -n "s/.*\"$json_field\":\"\([^\"]*\)\".*/\1/p"
+}
+
+command_install() {
+    CLIENT_EXECUTE=0
+    install_server_ip=
+    install_pairing_file=
+    install_headless=0
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --dry-run) CLIENT_EXECUTE=0 ;;
+            --execute) CLIENT_EXECUTE=1 ;;
+            --headless) install_headless=1 ;;
+            -*) die "unknown install option: $1" ;;
+            *)
+                if [ -z "$install_server_ip" ]; then
+                    install_server_ip=$1
+                elif [ -z "$install_pairing_file" ]; then
+                    install_pairing_file=$1
+                else
+                    die "install accepts SERVER_IP and one optional PAIRING_FILE"
+                fi
+                ;;
+        esac
+        shift
+    done
+
+    [ -n "$install_server_ip" ] || die "install requires SERVER_IP (example: 203.0.113.10)"
+    validate_server_ip "$install_server_ip"
+    if [ -z "$install_pairing_file" ]; then
+        install_pairing_file="$(pwd -P)/wg-pairing.wgp"
+    fi
+
+    if [ "$CLIENT_EXECUTE" -eq 1 ]; then
+        die "real installation is intentionally blocked: signed releases, privileged helper isolation, rollback, and desktop packaging are not implemented"
+    fi
+    if [ "$install_headless" -eq 1 ]; then
+        install_mode=headless
+    else
+        install_mode="desktop pairing wizard"
+    fi
+    cat <<EOF
+DRY-RUN: no host changes will be made.
+Would prepare the WG Go client and desktop UI from verified local artifacts.
+Would pin the server endpoint to: $install_server_ip
+Would use the pairing file: $install_pairing_file
+Pairing mode: $install_mode
+Would bind the development management API to: $CLIENT_MANAGEMENT_ADDR
+Would create a private DNS snapshot without modifying system DNS.
+Production install remains unavailable and fails closed with --execute.
+EOF
+}
+
+command_start() {
+    parse_execute_flag "$@"
+    validate_project_binary
+    validate_loopback_address "$CLIENT_MANAGEMENT_ADDR"
+
+    if [ "$CLIENT_EXECUTE" -eq 0 ]; then
+        cat <<EOF
+DRY-RUN: would start the project-local client core:
+  $CLIENT_BIN client --dev-safe --no-host-network
+  management: $CLIENT_MANAGEMENT_ADDR
+No DNS, route, firewall, TUN, or system-service changes will be made.
+EOF
+        return 0
+    fi
+
+    [ -x "$CLIENT_BIN" ] || die "project-local Go binary is missing or not executable: $CLIENT_BIN"
+    umask 077
+    mkdir -p "$STATE_DIR"
+
+    if read_pid; then
+        if kill -0 "$client_pid" 2>/dev/null; then
+            if process_matches "$client_pid"; then
+                die "development client is already running with PID $client_pid"
+            fi
+            die "PID file points to an unrelated process; refusing to signal PID $client_pid"
+        fi
+        rm -f "$PID_FILE"
+    fi
+
+    WG_DEV_SAFE=1 nohup "$CLIENT_BIN" client \
+        --dev-safe \
+        --no-host-network \
+        --management-address "$CLIENT_MANAGEMENT_ADDR" \
+        --wg-dev-instance=client >>"$LOG_FILE" 2>&1 &
+    client_pid=$!
+    printf '%s\n' "$client_pid" > "$PID_FILE"
+    sleep 1
+
+    if ! kill -0 "$client_pid" 2>/dev/null || ! process_matches "$client_pid"; then
+        rm -f "$PID_FILE"
+        die "development client exited during startup; inspect $LOG_FILE"
+    fi
+    printf 'WG development client started (PID %s). Log: %s\n' "$client_pid" "$LOG_FILE"
+}
+
+command_stop() {
+    parse_execute_flag "$@"
+    if [ "$CLIENT_EXECUTE" -eq 0 ]; then
+        printf 'DRY-RUN: would stop only the verified project-local WG client process recorded in %s\n' "$PID_FILE"
+        return 0
+    fi
+    if ! read_pid; then
+        printf 'WG development client is not running (no valid PID file).\n'
+        return 0
+    fi
+    if ! kill -0 "$client_pid" 2>/dev/null; then
+        rm -f "$PID_FILE"
+        printf 'Removed stale client PID file; no process was signalled.\n'
+        return 0
+    fi
+    process_matches "$client_pid" || die "PID $client_pid is not the expected project-local client; refusing to signal it"
+
+    kill -TERM "$client_pid"
+    stop_wait=5
+    while kill -0 "$client_pid" 2>/dev/null && [ "$stop_wait" -gt 0 ]; do
+        sleep 1
+        stop_wait=$((stop_wait - 1))
+    done
+    if kill -0 "$client_pid" 2>/dev/null; then
+        die "client did not stop after 5 seconds; no forced kill was attempted"
+    fi
+    rm -f "$PID_FILE"
+    printf 'WG development client stopped.\n'
+}
+
+command_status() {
+    [ "$#" -eq 0 ] || die "status does not accept options"
+    if ! [ -f "$PID_FILE" ]; then
+        printf 'stopped: no client PID file\n'
+        return 1
+    fi
+    if ! read_pid; then
+        printf 'unknown: malformed client PID file at %s\n' "$PID_FILE" >&2
+        return 1
+    fi
+    if kill -0 "$client_pid" 2>/dev/null; then
+        if process_matches "$client_pid"; then
+            printf 'running: WG development client PID %s\n' "$client_pid"
+            return 0
+        fi
+        printf 'unsafe-stale: PID %s belongs to another process\n' "$client_pid" >&2
+        return 1
+    fi
+    printf 'stopped: stale client PID file for PID %s\n' "$client_pid"
+    return 1
+}
+
+command_logs() {
+    logs_follow=0
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --follow|-f) logs_follow=1 ;;
+            *) die "unknown logs option: $1" ;;
+        esac
+        shift
+    done
+    [ -f "$LOG_FILE" ] || die "no development log exists yet: $LOG_FILE"
+    if [ "$logs_follow" -eq 1 ]; then
+        tail -n 100 -f "$LOG_FILE"
+    else
+        tail -n 100 "$LOG_FILE"
+    fi
+}
+
+command_pair() {
+    CLIENT_EXECUTE=0
+    pair_server=
+    pair_file=
+    pair_fingerprint=
+    pair_confirmed=0
+    pair_authorized=0
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --dry-run) CLIENT_EXECUTE=0 ;;
+            --execute) CLIENT_EXECUTE=1 ;;
+            --server)
+                [ "$#" -ge 2 ] || die "--server requires an IP"
+                shift
+                pair_server=$1
+                ;;
+            --file)
+                [ "$#" -ge 2 ] || die "--file requires a pairing-file path"
+                shift
+                pair_file=$1
+                ;;
+            --fingerprint)
+                [ "$#" -ge 2 ] || die "--fingerprint requires a value"
+                shift
+                pair_fingerprint=$1
+                ;;
+            --confirm-fingerprint) pair_confirmed=1 ;;
+            --confirm-authorization) pair_authorized=1 ;;
+            *) die "unknown pair option: $1" ;;
+        esac
+        shift
+    done
+
+    [ -n "$pair_server" ] || die "pair requires --server IP"
+    [ -n "$pair_file" ] || die "pair requires --file FILE"
+    [ -n "$pair_fingerprint" ] || die "pair requires --fingerprint VALUE"
+    [ "$pair_confirmed" -eq 1 ] || die "fingerprint must be confirmed with --confirm-fingerprint"
+    [ "$pair_authorized" -eq 1 ] || die "limited system authorization must be confirmed with --confirm-authorization"
+    validate_server_ip "$pair_server"
+    case "$pair_fingerprint" in
+        *[!A-Za-z0-9:._-]*) die "fingerprint contains unsupported characters" ;;
+    esac
+    case "$pair_fingerprint" in
+        wgs-*) ;;
+        *) die "fingerprint must use the normative wgs- Base32 format" ;;
+    esac
+    validate_loopback_address "$CLIENT_MANAGEMENT_ADDR"
+
+    if [ "$CLIENT_EXECUTE" -eq 1 ]; then
+        [ ! -L "$pair_file" ] || die "pairing file must not be a symbolic link"
+        [ -f "$pair_file" ] && [ -r "$pair_file" ] || die "pairing file is not a readable regular file: $pair_file"
+        if stat -f '%Lp' "$pair_file" >/dev/null 2>&1; then
+            pair_mode=$(stat -f '%Lp' "$pair_file")
+        else
+            pair_mode=$(stat -c '%a' "$pair_file" 2>/dev/null || :)
+        fi
+        [ "$pair_mode" = "600" ] || die "pairing file permissions must be exactly 0600"
+    fi
+
+    pair_file_name=${pair_file##*/}
+    [ "$pair_file_name" = "wg-pairing.wgp" ] || die "pairing file must be named wg-pairing.wgp"
+    validation_body="{\"server_ip\":\"$pair_server\",\"file_name\":\"$pair_file_name\",\"fingerprint\":\"$pair_fingerprint\"}"
+    if [ "$CLIENT_EXECUTE" -eq 0 ]; then
+        api_json POST /pairing/validate "$validation_body"
+        printf 'DRY-RUN: would verify the returned validation ID and fingerprint before enrollment.\n'
+        printf 'DRY-RUN: POST %s/pairing/enroll (validated JSON body omitted)\n' "$API_BASE"
+        return 0
+    fi
+
+    validation_response=$(api_json_capture POST /pairing/validate "$validation_body")
+    validation_id=$(json_string_field "$validation_response" validation_id)
+    validated_fingerprint=$(json_string_field "$validation_response" fingerprint)
+    validated_file_name=$(json_string_field "$validation_response" file_name)
+    [ "${#validation_id}" -eq 32 ] || die "pairing validation returned an invalid validation_id"
+    case "$validation_id" in
+        *[!0-9a-f]*) die "pairing validation returned an invalid validation_id" ;;
+    esac
+    [ "$validated_fingerprint" = "$pair_fingerprint" ] || die "validated server fingerprint does not match the independently confirmed fingerprint"
+    [ "$validated_file_name" = "$pair_file_name" ] || die "pairing validation returned a different file name"
+
+    make_operation_id
+    api_json POST /pairing/enroll \
+        "{\"operation_id\":\"$operation_id\",\"validation_id\":\"$validation_id\",\"server_ip\":\"$pair_server\",\"file_name\":\"$pair_file_name\",\"fingerprint\":\"$validated_fingerprint\",\"fingerprint_confirmed\":true,\"authorization_confirmed\":true}"
+}
+
+command_rules() {
+    [ "$#" -gt 0 ] || die "rules requires list, add, or delete"
+    rules_action=$1
+    shift
+    CLIENT_EXECUTE=0
+
+    case "$rules_action" in
+        list)
+            parse_execute_flag "$@"
+            validate_loopback_address "$CLIENT_MANAGEMENT_ADDR"
+            api_simple GET /rules
+            ;;
+        add)
+            rule_target=
+            rule_result=
+            rule_expires=
+            while [ "$#" -gt 0 ]; do
+                case "$1" in
+                    --dry-run) CLIENT_EXECUTE=0 ;;
+                    --execute) CLIENT_EXECUTE=1 ;;
+                    --target)
+                        [ "$#" -ge 2 ] || die "--target requires a domain or IP"
+                        shift
+                        rule_target=$1
+                        ;;
+                    --result)
+                        [ "$#" -ge 2 ] || die "--result requires TUNNEL, DIRECT, or BLOCK"
+                        shift
+                        rule_result=$1
+                        ;;
+                    --expires)
+                        [ "$#" -ge 2 ] || die "--expires requires an RFC3339 timestamp"
+                        shift
+                        rule_expires=$1
+                        ;;
+                    *) die "unknown rules add option: $1" ;;
+                esac
+                shift
+            done
+            [ -n "$rule_target" ] || die "rules add requires --target"
+            case "$rule_result" in
+                TUNNEL|DIRECT|BLOCK) ;;
+                AUTO) die "AUTO is restored by deleting a manual override; it is not a stored rule" ;;
+                *) die "rules result must be TUNNEL, DIRECT, or BLOCK" ;;
+            esac
+            case "$rule_target" in
+                *[!A-Za-z0-9._:/-]*) die "rule target contains unsupported characters" ;;
+            esac
+            case "$rule_expires" in
+                *[!0-9TZ:+.-]*) die "expiry contains unsupported characters" ;;
+            esac
+            validate_loopback_address "$CLIENT_MANAGEMENT_ADDR"
+            make_operation_id
+            if [ -n "$rule_expires" ]; then
+                api_json POST /rules \
+                    "{\"operation_id\":\"$operation_id\",\"target\":\"$rule_target\",\"result\":\"$rule_result\",\"expires_at\":\"$rule_expires\"}"
+            else
+                api_json POST /rules \
+                    "{\"operation_id\":\"$operation_id\",\"target\":\"$rule_target\",\"result\":\"$rule_result\"}"
+            fi
+            ;;
+        delete)
+            rule_id=
+            while [ "$#" -gt 0 ]; do
+                case "$1" in
+                    --dry-run) CLIENT_EXECUTE=0 ;;
+                    --execute) CLIENT_EXECUTE=1 ;;
+                    -*) die "unknown rules delete option: $1" ;;
+                    *)
+                        [ -z "$rule_id" ] || die "rules delete accepts one RULE_ID"
+                        rule_id=$1
+                        ;;
+                esac
+                shift
+            done
+            [ -n "$rule_id" ] || die "rules delete requires RULE_ID"
+            case "$rule_id" in
+                *[!A-Za-z0-9._:-]*) die "RULE_ID contains unsupported characters" ;;
+            esac
+            validate_loopback_address "$CLIENT_MANAGEMENT_ADDR"
+            printf 'Rule deletion semantics: the target returns to AUTO evaluation.\n'
+            make_operation_id
+            api_json DELETE "/rules/$rule_id" "{\"operation_id\":\"$operation_id\"}"
+            ;;
+        *) die "unknown rules action: $rules_action" ;;
+    esac
+}
+
+validate_rule_target() {
+    split_target_value=$1
+    [ -n "$split_target_value" ] || die "split target must not be empty"
+    case "$split_target_value" in
+        *[!A-Za-z0-9._:/-]*) die "split target contains unsupported characters" ;;
+    esac
+}
+
+command_split() {
+    [ "$#" -gt 0 ] || die "split requires list, explain, set, or delete"
+    split_action=$1
+    shift
+    CLIENT_EXECUTE=0
+
+    case "$split_action" in
+        list)
+            split_result=
+            split_source=
+            while [ "$#" -gt 0 ]; do
+                case "$1" in
+                    --dry-run) CLIENT_EXECUTE=0 ;;
+                    --execute) CLIENT_EXECUTE=1 ;;
+                    --action)
+                        [ "$#" -ge 2 ] || die "--action requires tunnel, direct, or block"
+                        shift
+                        case "$1" in
+                            tunnel|TUNNEL) split_result=TUNNEL ;;
+                            direct|DIRECT) split_result=DIRECT ;;
+                            block|BLOCK) split_result=BLOCK ;;
+                            *) die "--action requires tunnel, direct, or block" ;;
+                        esac
+                        ;;
+                    --source)
+                        [ "$#" -ge 2 ] || die "--source requires user or auto"
+                        shift
+                        case "$1" in
+                            user|USER|manual|MANUAL) split_source=MANUAL ;;
+                            auto|AUTO|automatic|AUTOMATIC) split_source=AUTOMATIC ;;
+                            *) die "--source requires user or auto" ;;
+                        esac
+                        ;;
+                    *) die "unknown split list option: $1" ;;
+                esac
+                shift
+            done
+            validate_loopback_address "$CLIENT_MANAGEMENT_ADDR"
+            split_query="?limit=200"
+            [ -z "$split_result" ] || split_query="$split_query&result=$split_result"
+            [ -z "$split_source" ] || split_query="$split_query&source=$split_source"
+            api_simple GET "/rules$split_query"
+            ;;
+        explain)
+            split_target=
+            while [ "$#" -gt 0 ]; do
+                case "$1" in
+                    --dry-run) CLIENT_EXECUTE=0 ;;
+                    --execute) CLIENT_EXECUTE=1 ;;
+                    -*) die "unknown split explain option: $1" ;;
+                    *)
+                        [ -z "$split_target" ] || die "split explain accepts one target"
+                        split_target=$1
+                        ;;
+                esac
+                shift
+            done
+            validate_rule_target "$split_target"
+            validate_loopback_address "$CLIENT_MANAGEMENT_ADDR"
+            if [ "$CLIENT_EXECUTE" -eq 0 ]; then
+                printf 'DRY-RUN: GET %s/rules/explain?target=%s\n' "$API_BASE" "$split_target"
+            else
+                require_curl
+                curl --fail --silent --show-error --noproxy '*' --connect-timeout 2 --max-time 15 \
+                    --get --data-urlencode "target=$split_target" "$API_BASE/rules/explain"
+                printf '\n'
+            fi
+            ;;
+        set)
+            [ "$#" -ge 2 ] || die "split set requires ACTION and TARGET"
+            split_result=$1
+            split_target=$2
+            shift 2
+            split_expires=
+            case "$split_result" in
+                tunnel|TUNNEL) split_result=TUNNEL ;;
+                direct|DIRECT) split_result=DIRECT ;;
+                block|BLOCK) split_result=BLOCK ;;
+                *) die "split set action must be tunnel, direct, or block" ;;
+            esac
+            while [ "$#" -gt 0 ]; do
+                case "$1" in
+                    --dry-run) CLIENT_EXECUTE=0 ;;
+                    --execute) CLIENT_EXECUTE=1 ;;
+                    --expires)
+                        [ "$#" -ge 2 ] || die "--expires requires an RFC3339 timestamp"
+                        shift
+                        split_expires=$1
+                        ;;
+                    *) die "unknown split set option: $1" ;;
+                esac
+                shift
+            done
+            validate_rule_target "$split_target"
+            case "$split_expires" in
+                *[!0-9TZ:+.-]*) die "expiry contains unsupported characters" ;;
+            esac
+            validate_loopback_address "$CLIENT_MANAGEMENT_ADDR"
+            make_operation_id
+            if [ -n "$split_expires" ]; then
+                api_json POST /rules "{\"operation_id\":\"$operation_id\",\"target\":\"$split_target\",\"result\":\"$split_result\",\"expires_at\":\"$split_expires\"}"
+            else
+                api_json POST /rules "{\"operation_id\":\"$operation_id\",\"target\":\"$split_target\",\"result\":\"$split_result\"}"
+            fi
+            ;;
+        delete)
+            split_target=
+            while [ "$#" -gt 0 ]; do
+                case "$1" in
+                    --dry-run) CLIENT_EXECUTE=0 ;;
+                    --execute) CLIENT_EXECUTE=1 ;;
+                    -*) die "unknown split delete option: $1" ;;
+                    *)
+                        [ -z "$split_target" ] || die "split delete accepts one target"
+                        split_target=$1
+                        ;;
+                esac
+                shift
+            done
+            validate_rule_target "$split_target"
+            validate_loopback_address "$CLIENT_MANAGEMENT_ADDR"
+            printf 'Split deletion semantics: %s returns to AUTO evaluation.\n' "$split_target"
+            make_operation_id
+            api_json DELETE /rules "{\"operation_id\":\"$operation_id\",\"target\":\"$split_target\"}"
+            ;;
+        *) die "unknown split action: $split_action" ;;
+    esac
+}
+
+command_diagnose() {
+    parse_execute_flag "$@"
+    validate_loopback_address "$CLIENT_MANAGEMENT_ADDR"
+    api_simple POST /diagnostics
+}
+
+command_update() {
+    CLIENT_EXECUTE=0
+    update_action=check
+    update_action_set=0
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --dry-run) CLIENT_EXECUTE=0 ;;
+            --execute) CLIENT_EXECUTE=1 ;;
+            check|apply|rollback)
+                [ "$update_action_set" -eq 0 ] || die "update accepts one action"
+                update_action=$1
+                update_action_set=1
+                ;;
+            *) die "unknown update option/action: $1" ;;
+        esac
+        shift
+    done
+    validate_loopback_address "$CLIENT_MANAGEMENT_ADDR"
+    case "$update_action" in
+        check) api_simple POST /updates/check ;;
+        apply)
+            make_operation_id
+            api_json POST /updates/upgrade "{\"operation_id\":\"$operation_id\"}"
+            ;;
+        rollback)
+            make_operation_id
+            api_json POST /updates/rollback "{\"operation_id\":\"$operation_id\"}"
+            ;;
+    esac
+}
+
+command_uninstall() {
+    CLIENT_EXECUTE=0
+    uninstall_purge=0
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --dry-run) CLIENT_EXECUTE=0 ;;
+            --execute) CLIENT_EXECUTE=1 ;;
+            --purge) uninstall_purge=1 ;;
+            *) die "unknown uninstall option: $1" ;;
+        esac
+        shift
+    done
+    if [ "$CLIENT_EXECUTE" -eq 1 ]; then
+        die "real uninstall is intentionally blocked until signed installation manifests and rollback are implemented"
+    fi
+    printf 'DRY-RUN: would remove only verified WG client artifacts; purge=%s. No system DNS change would be made.\n' "$uninstall_purge"
+}
+
+client_command=${1:-help}
+if [ "$#" -gt 0 ]; then
+    shift
+fi
+
+case "$client_command" in
+    help|-h|--help) print_help ;;
+    install) command_install "$@" ;;
+    start) command_start "$@" ;;
+    stop) command_stop "$@" ;;
+    status) command_status "$@" ;;
+    logs) command_logs "$@" ;;
+    pair) command_pair "$@" ;;
+    split) command_split "$@" ;;
+    rules) command_rules "$@" ;;
+    diagnose|doctor) command_diagnose "$@" ;;
+    update) command_update "$@" ;;
+    upgrade) command_update apply "$@" ;;
+    rollback) command_update rollback "$@" ;;
+    uninstall) command_uninstall "$@" ;;
+    *) die "unknown command: $client_command (run: wg-client help)" ;;
+esac

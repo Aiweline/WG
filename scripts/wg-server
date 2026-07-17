@@ -1,0 +1,412 @@
+#!/bin/sh
+
+# WG server developer orchestration. This script intentionally does not install
+# services or alter DNS, routes, forwarding, or firewall rules.
+set -eu
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+
+SCRIPT_DIR=$(CDPATH= cd -P "$(dirname "$0")" && pwd)
+ROOT_DIR=$(CDPATH= cd -P "$SCRIPT_DIR/.." && pwd)
+STATE_DIR="$ROOT_DIR/.wg-dev/server"
+PID_FILE="$STATE_DIR/wg-server.pid"
+LOG_FILE="$STATE_DIR/wg-server.log"
+
+SERVER_BIN=${WG_SERVER_BIN:-bin/wg-core}
+case "$SERVER_BIN" in
+    /*) ;;
+    *) SERVER_BIN="$ROOT_DIR/$SERVER_BIN" ;;
+esac
+
+SERVER_LISTEN_ADDR=${WG_SERVER_LISTEN_ADDR:-0.0.0.0:47001}
+SERVER_MANAGEMENT_ADDR=${WG_SERVER_MANAGEMENT_ADDR:-127.0.0.1:47002}
+
+die() {
+    printf 'wg-server: %s\n' "$*" >&2
+    exit 2
+}
+
+print_help() {
+    cat <<'EOF'
+WG server developer script (server has no UI)
+
+Usage:
+  wg-server help
+  wg-server install [PUBLIC_IP] [--dry-run|--execute]
+  wg-server start [--dry-run|--execute]
+  wg-server stop [--dry-run|--execute]
+  wg-server status
+  wg-server logs [--follow]
+  wg-server doctor [--dry-run|--execute]
+  wg-server pair [--output PATH] [--expires 10m] [--dry-run|--execute]
+  wg-server clients [--dry-run|--execute]
+  wg-server revoke CLIENT_ID [--dry-run|--execute]
+  wg-server upgrade [--dry-run|--execute]
+  wg-server rollback [--dry-run|--execute]
+  wg-server uninstall [--purge] [--dry-run|--execute]
+
+Safety model:
+  --dry-run is the default for install/start/stop.
+  install --execute always fails closed: production installation is not built.
+  start/stop --execute only manage a project-local development process under
+  .wg-dev/server. This script never invokes sudo, a service manager, DNS tools,
+  route tools, or firewall tools.
+
+Environment:
+  WG_SERVER_BIN              Project-local Go binary (default: bin/wg-core)
+  WG_SERVER_LISTEN_ADDR      UDP development listener (default: 0.0.0.0:47001)
+  WG_SERVER_MANAGEMENT_ADDR  Loopback management address (default: 127.0.0.1:47002)
+  WG_SERVER_PUBLIC_IP        Public IP used by install dry-run output
+EOF
+}
+
+validate_project_binary() {
+    case "$SERVER_BIN" in
+        "$ROOT_DIR"/*) ;;
+        *) die "WG_SERVER_BIN must resolve inside $ROOT_DIR" ;;
+    esac
+}
+
+validate_loopback_address() {
+    loopback_value=$1
+    case "$loopback_value" in
+        127.0.0.1:*) loopback_port=${loopback_value#127.0.0.1:} ;;
+        *) die "management address must use 127.0.0.1, got: $loopback_value" ;;
+    esac
+    case "$loopback_port" in
+        ''|*[!0-9]*) die "management port must be numeric" ;;
+    esac
+    if [ "$loopback_port" -lt 1 ] || [ "$loopback_port" -gt 65535 ]; then
+        die "management port must be between 1 and 65535"
+    fi
+}
+
+validate_public_ip() {
+    public_ip_value=$1
+    case "$public_ip_value" in
+        ''|*[!0-9A-Fa-f:.]*) die "PUBLIC_IP must contain only IPv4/IPv6 address characters" ;;
+    esac
+    case "$public_ip_value" in
+        *.*|*:*) ;;
+        *) die "PUBLIC_IP does not look like an IPv4 or IPv6 address" ;;
+    esac
+}
+
+read_pid() {
+    [ -f "$PID_FILE" ] || return 1
+    IFS= read -r server_pid < "$PID_FILE" || return 1
+    case "$server_pid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    return 0
+}
+
+process_matches() {
+    process_pid=$1
+    process_command=$(ps -p "$process_pid" -o command= 2>/dev/null || :)
+    case "$process_command" in
+        *"$SERVER_BIN"*) ;;
+        *) return 1 ;;
+    esac
+    case "$process_command" in
+        *"--wg-dev-instance=server"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+parse_execute_flag() {
+    SERVER_EXECUTE=0
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --dry-run) SERVER_EXECUTE=0 ;;
+            --execute) SERVER_EXECUTE=1 ;;
+            *) die "unknown option: $1" ;;
+        esac
+        shift
+    done
+}
+
+command_install() {
+    SERVER_EXECUTE=0
+    install_public_ip=${WG_SERVER_PUBLIC_IP:-}
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --dry-run) SERVER_EXECUTE=0 ;;
+            --execute) SERVER_EXECUTE=1 ;;
+            --public-ip)
+                [ "$#" -ge 2 ] || die "--public-ip requires a value"
+                shift
+                install_public_ip=$1
+                ;;
+            -*) die "unknown install option: $1" ;;
+            *)
+                [ -z "$install_public_ip" ] || die "install accepts only one PUBLIC_IP"
+                install_public_ip=$1
+                ;;
+        esac
+        shift
+    done
+
+    [ -n "$install_public_ip" ] || die "install requires PUBLIC_IP (example: 203.0.113.10)"
+    validate_public_ip "$install_public_ip"
+
+    if [ "$SERVER_EXECUTE" -eq 1 ]; then
+        die "real installation is intentionally blocked: signed releases, rollback, service isolation, routing, and firewall integration are not implemented"
+    fi
+
+    cat <<EOF
+DRY-RUN: no host changes will be made.
+Would prepare a script-only WG server for public IP: $install_public_ip
+Would use UDP data address: $SERVER_LISTEN_ADDR
+Would bind the development management API to: $SERVER_MANAGEMENT_ADDR
+Production install remains unavailable and fails closed with --execute.
+EOF
+}
+
+command_start() {
+    parse_execute_flag "$@"
+    validate_project_binary
+    validate_loopback_address "$SERVER_MANAGEMENT_ADDR"
+
+    if [ "$SERVER_EXECUTE" -eq 0 ]; then
+        cat <<EOF
+DRY-RUN: would start the project-local server binary:
+  $SERVER_BIN server --dev-safe --no-host-network
+  data: $SERVER_LISTEN_ADDR
+  management: $SERVER_MANAGEMENT_ADDR
+No DNS, route, firewall, forwarding, or system-service changes will be made.
+EOF
+        return 0
+    fi
+
+    [ -x "$SERVER_BIN" ] || die "project-local Go binary is missing or not executable: $SERVER_BIN"
+    umask 077
+    mkdir -p "$STATE_DIR"
+
+    if read_pid; then
+        if kill -0 "$server_pid" 2>/dev/null; then
+            if process_matches "$server_pid"; then
+                die "development server is already running with PID $server_pid"
+            fi
+            die "PID file points to an unrelated process; refusing to signal PID $server_pid"
+        fi
+        rm -f "$PID_FILE"
+    fi
+
+    WG_DEV_SAFE=1 nohup "$SERVER_BIN" server \
+        --dev-safe \
+        --no-host-network \
+        --listen "$SERVER_LISTEN_ADDR" \
+        --management-address "$SERVER_MANAGEMENT_ADDR" \
+        --wg-dev-instance=server >>"$LOG_FILE" 2>&1 &
+    server_pid=$!
+    printf '%s\n' "$server_pid" > "$PID_FILE"
+    sleep 1
+
+    if ! kill -0 "$server_pid" 2>/dev/null || ! process_matches "$server_pid"; then
+        rm -f "$PID_FILE"
+        die "development server exited during startup; inspect $LOG_FILE"
+    fi
+    printf 'WG development server started (PID %s). Log: %s\n' "$server_pid" "$LOG_FILE"
+}
+
+command_stop() {
+    parse_execute_flag "$@"
+
+    if [ "$SERVER_EXECUTE" -eq 0 ]; then
+        printf 'DRY-RUN: would stop only the verified project-local WG server process recorded in %s\n' "$PID_FILE"
+        return 0
+    fi
+
+    if ! read_pid; then
+        printf 'WG development server is not running (no valid PID file).\n'
+        return 0
+    fi
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+        rm -f "$PID_FILE"
+        printf 'Removed stale server PID file; no process was signalled.\n'
+        return 0
+    fi
+    process_matches "$server_pid" || die "PID $server_pid is not the expected project-local server; refusing to signal it"
+
+    kill -TERM "$server_pid"
+    stop_wait=5
+    while kill -0 "$server_pid" 2>/dev/null && [ "$stop_wait" -gt 0 ]; do
+        sleep 1
+        stop_wait=$((stop_wait - 1))
+    done
+    if kill -0 "$server_pid" 2>/dev/null; then
+        die "server did not stop after 5 seconds; no forced kill was attempted"
+    fi
+    rm -f "$PID_FILE"
+    printf 'WG development server stopped.\n'
+}
+
+command_status() {
+    [ "$#" -eq 0 ] || die "status does not accept options"
+    if ! [ -f "$PID_FILE" ]; then
+        printf 'stopped: no server PID file\n'
+        return 1
+    fi
+    if ! read_pid; then
+        printf 'unknown: malformed server PID file at %s\n' "$PID_FILE" >&2
+        return 1
+    fi
+    if kill -0 "$server_pid" 2>/dev/null; then
+        if process_matches "$server_pid"; then
+            printf 'running: WG development server PID %s\n' "$server_pid"
+            return 0
+        fi
+        printf 'unsafe-stale: PID %s belongs to another process\n' "$server_pid" >&2
+        return 1
+    fi
+    printf 'stopped: stale server PID file for PID %s\n' "$server_pid"
+    return 1
+}
+
+command_logs() {
+    logs_follow=0
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --follow|-f) logs_follow=1 ;;
+            *) die "unknown logs option: $1" ;;
+        esac
+        shift
+    done
+    [ -f "$LOG_FILE" ] || die "no development log exists yet: $LOG_FILE"
+    if [ "$logs_follow" -eq 1 ]; then
+        tail -n 100 -f "$LOG_FILE"
+    else
+        tail -n 100 "$LOG_FILE"
+    fi
+}
+
+command_doctor() {
+    parse_execute_flag "$@"
+    validate_loopback_address "$SERVER_MANAGEMENT_ADDR"
+    doctor_url="http://$SERVER_MANAGEMENT_ADDR/api/v1/diagnostics"
+    if [ "$SERVER_EXECUTE" -eq 0 ]; then
+        printf 'DRY-RUN: POST %s (redacted server diagnostic)\n' "$doctor_url"
+        return 0
+    fi
+    command -v curl >/dev/null 2>&1 || die "curl is required for doctor --execute"
+    curl --fail --silent --show-error --noproxy '*' --connect-timeout 2 --max-time 15 \
+        -X POST -H 'Accept: application/json' "$doctor_url"
+    printf '\n'
+}
+
+command_pair() {
+    SERVER_EXECUTE=0
+    pair_output="$(pwd -P)/wg-pairing.wgp"
+    pair_expires=10m
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --dry-run) SERVER_EXECUTE=0 ;;
+            --execute) SERVER_EXECUTE=1 ;;
+            --output)
+                [ "$#" -ge 2 ] || die "--output requires a path"
+                shift
+                pair_output=$1
+                ;;
+            --expires)
+                [ "$#" -ge 2 ] || die "--expires requires a duration"
+                shift
+                pair_expires=$1
+                ;;
+            *) die "unknown pair option: $1" ;;
+        esac
+        shift
+    done
+    case "$pair_expires" in
+        ''|*[!0-9smhd]*) die "pair expiry must be a simple duration such as 10m" ;;
+    esac
+    if [ "$SERVER_EXECUTE" -eq 1 ]; then
+        die "real pairing-file generation is blocked until one-time enrollment storage and atomic consumption are implemented"
+    fi
+    printf 'DRY-RUN: would create one 0600 single-recipient pairing file at %s with expiry %s; no file was written.\n' "$pair_output" "$pair_expires"
+}
+
+command_clients() {
+    parse_execute_flag "$@"
+    if [ "$SERVER_EXECUTE" -eq 1 ]; then
+        die "client registry operations are unavailable until persistent enrollment storage is implemented"
+    fi
+    printf 'DRY-RUN: would list registered clients without displaying public keys, tokens, or traffic destinations.\n'
+}
+
+command_revoke() {
+    SERVER_EXECUTE=0
+    revoke_client_id=
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --dry-run) SERVER_EXECUTE=0 ;;
+            --execute) SERVER_EXECUTE=1 ;;
+            -*) die "unknown revoke option: $1" ;;
+            *)
+                [ -z "$revoke_client_id" ] || die "revoke accepts one CLIENT_ID"
+                revoke_client_id=$1
+                ;;
+        esac
+        shift
+    done
+    [ -n "$revoke_client_id" ] || die "revoke requires CLIENT_ID"
+    case "$revoke_client_id" in
+        c-[a-z2-7][a-z2-7]*) ;;
+        *) die "CLIENT_ID must use the normative c- Base32 form" ;;
+    esac
+    if [ "$SERVER_EXECUTE" -eq 1 ]; then
+        die "client revocation is unavailable until the authenticated registry is implemented"
+    fi
+    printf 'DRY-RUN: would atomically revoke %s and close its sessions.\n' "$revoke_client_id"
+}
+
+command_release_action() {
+    release_action=$1
+    shift
+    parse_execute_flag "$@"
+    if [ "$SERVER_EXECUTE" -eq 1 ]; then
+        die "$release_action is blocked until signed manifests, atomic install, and rollback verification are implemented"
+    fi
+    printf 'DRY-RUN: would perform signed WG server %s with an atomic rollback point.\n' "$release_action"
+}
+
+command_uninstall() {
+    SERVER_EXECUTE=0
+    uninstall_purge=0
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --dry-run) SERVER_EXECUTE=0 ;;
+            --execute) SERVER_EXECUTE=1 ;;
+            --purge) uninstall_purge=1 ;;
+            *) die "unknown uninstall option: $1" ;;
+        esac
+        shift
+    done
+    if [ "$SERVER_EXECUTE" -eq 1 ]; then
+        die "real uninstall is blocked until signed installation manifests and verified rollback are implemented"
+    fi
+    printf 'DRY-RUN: would remove only verified WG server artifacts; purge=%s. Existing host firewall and DNS would not be rewritten.\n' "$uninstall_purge"
+}
+
+server_command=${1:-help}
+if [ "$#" -gt 0 ]; then
+    shift
+fi
+
+case "$server_command" in
+    help|-h|--help) print_help ;;
+    install) command_install "$@" ;;
+    start) command_start "$@" ;;
+    stop) command_stop "$@" ;;
+    status) command_status "$@" ;;
+    logs) command_logs "$@" ;;
+    doctor) command_doctor "$@" ;;
+    pair) command_pair "$@" ;;
+    clients) command_clients "$@" ;;
+    revoke) command_revoke "$@" ;;
+    upgrade) command_release_action upgrade "$@" ;;
+    rollback) command_release_action rollback "$@" ;;
+    uninstall) command_uninstall "$@" ;;
+    *) die "unknown command: $server_command (run: wg-server help)" ;;
+esac
