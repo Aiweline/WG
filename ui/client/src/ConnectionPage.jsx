@@ -21,8 +21,8 @@ export function ConnectionPage({ status, busy, onDisconnect, onReconnect, onNavi
       <div className="connection-hero" aria-live="polite">
         <span className={'connection-indicator ' + (connected ? 'connected' : '')} aria-hidden="true" />
         <div>
-          <h2>{connecting ? '正在连接' : connected ? '已连接' : '未连接'}</h2>
-          <p>{connected ? '隧道运行正常' : connecting ? '正在安全建立隧道…' : '隧道已停止'}</p>
+          <h2>{connecting ? '正在连接' : connected ? status.proxyRuntime ? '代理已运行' : '已连接' : '未连接'}</h2>
+          <p>{connected ? status.proxyRuntime ? '本机 TCP 代理正在监听' : '隧道运行正常' : connecting ? '正在安全建立隧道…' : '隧道已停止'}</p>
         </div>
       </div>
 

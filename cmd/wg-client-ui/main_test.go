@@ -63,3 +63,12 @@ func TestProxyTestHandlerRejectsGet(t *testing.T) {
 		t.Fatalf("status = %d", response.Code)
 	}
 }
+
+func TestProxyStatusRejectsPost(t *testing.T) {
+	handler := newProxyTestHandler()
+	response := httptest.NewRecorder()
+	handler.status(response, httptest.NewRequest(http.MethodPost, "/api/proxy/status", nil))
+	if response.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d", response.Code)
+	}
+}

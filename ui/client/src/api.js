@@ -256,6 +256,7 @@ export const api = {
   deleteRule: (rule) => request('/rules/' + encodeURIComponent(rule.id), { method: 'DELETE', body: JSON.stringify({ operation_id: operationId(), ...(rule.revision == null ? {} : { expected_revision: rule.revision }) }) }),
   refreshDns: () => post('/dns/refresh').then((payload) => normalizeDns(payload?.dns || payload)),
   doctor: () => post('/diagnostics').then(normalizeDoctor),
+  proxyStatus: () => request('/api/proxy/status'),
   proxyTest: () => request('/api/proxy/test', { method: 'POST' }),
   checkUpdate: () => post('/updates/check'),
   upgrade: () => post('/updates/upgrade'),

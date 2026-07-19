@@ -66,6 +66,10 @@ func run() error {
 	proxyTests := newProxyTestHandler()
 	staticHandler := newSPAHandler(root)
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/proxy/status" {
+			proxyTests.status(w, r)
+			return
+		}
 		if r.URL.Path == "/api/proxy/test" {
 			proxyTests.ServeHTTP(w, r)
 			return
@@ -137,6 +141,40 @@ func (h proxyTestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	report := proxyTestReport{GeneratedAt: time.Now().UTC(), TCP: testTCPProxy(), UDP: testUDPRelay(), SystemDNS: h.testSystemDNS()}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(report)
+}
+
+func (h proxyTestHandler) status(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	tcp := portListening("tcp", "127.0.0.1:47101")
+	udp := udpPortOccupied("127.0.0.1:47102")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(map[string]any{"tcp_listener": tcp, "udp_listener": udp})
+}
+
+func portListening(network, address string) bool {
+	conn, err := net.DialTimeout(network, address, 300*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+func udpPortOccupied(address string) bool {
+	udpAddress, err := net.ResolveUDPAddr("udp", address)
+	if err != nil {
+		return false
+	}
+	conn, err := net.ListenUDP("udp", udpAddress)
+	if err != nil {
+		return true
+	}
+	_ = conn.Close()
+	return false
 }
 
 func testTCPProxy() proxyTestResult {

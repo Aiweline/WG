@@ -38,6 +38,7 @@ export function App() {
   const [health, setHealth] = useState(demoHealth);
   const [diagnosticReport, setDiagnosticReport] = useState(demoDiagnostics);
   const [proxyTests, setProxyTests] = useState(null);
+  const [proxyRuntime, setProxyRuntime] = useState({ tcp_listener: false, udp_listener: false });
   const [busy, setBusy] = useState('');
   const [updateState, setUpdateState] = useState('idle');
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
@@ -66,6 +67,27 @@ export function App() {
     }
     load();
     return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    async function loadProxyRuntime() {
+      try {
+        const runtime = await api.proxyStatus();
+        if (!active) return;
+        setProxyRuntime(runtime);
+        if (runtime?.tcp_listener) {
+          setStatus((current) => ({ ...current, connection: 'connected', endpoint: '本机 TCP 代理 127.0.0.1:47101', duration: '—', uploaded: '—', downloaded: '—', dnsState: 'ready', proxyRuntime: true }));
+        } else {
+          setStatus((current) => ({ ...current, connection: 'disconnected', endpoint: '本机代理未启动', duration: '—', uploaded: '—', downloaded: '—', proxyRuntime: true }));
+        }
+      } catch {
+        // The normal core UI remains available when its local host is not running.
+      }
+    }
+    loadProxyRuntime();
+    const timer = window.setInterval(loadProxyRuntime, 5000);
+    return () => { active = false; window.clearInterval(timer); };
   }, []);
 
   useEffect(() => {
@@ -269,7 +291,7 @@ export function App() {
   return (
     <>
       <a className="skip-link" href="#main-content">跳到主要内容</a>
-      <Layout page={page} onNavigate={setPage} backendMode={backendMode} status={status} versions={versions}>
+      <Layout page={page} onNavigate={setPage} backendMode={backendMode} proxyRuntime={proxyRuntime} status={status} versions={versions}>
         {renderPage()}
       </Layout>
       {toast && (

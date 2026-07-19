@@ -19,7 +19,7 @@ const navigation = [
   { id: 'health', label: '健康与更新', icon: Pulse },
 ];
 
-export function Layout({ page, onNavigate, backendMode, status, versions, children }) {
+export function Layout({ page, onNavigate, backendMode, proxyRuntime, status, versions, children }) {
   const connected = status.connection === 'connected';
 
   return (
@@ -70,6 +70,10 @@ export function Layout({ page, onNavigate, backendMode, status, versions, childr
         <header className="window-bar" aria-label="窗口栏">
           {backendMode === 'checking' ? (
             <span className="backend-chip checking"><CircleNotch className="spin" size={16} /> 正在连接后台</span>
+          ) : proxyRuntime?.tcp_listener ? (
+            <span className="backend-chip live" title="本机 TCP 代理已监听；管理核心仍可能处于演示模式">
+              真实代理已运行{proxyRuntime.udp_listener ? ' · TCP/UDP' : ' · TCP'}
+            </span>
           ) : backendMode === 'demo' ? (
             <span className="backend-chip demo" title="所有操作只保存在当前浏览器会话，不会修改真实网络或系统 DNS">
               安全演示 · 不修改系统
@@ -108,4 +112,3 @@ export function Layout({ page, onNavigate, backendMode, status, versions, childr
     </div>
   );
 }
-
