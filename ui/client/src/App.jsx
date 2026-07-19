@@ -37,6 +37,7 @@ export function App() {
   const [versions, setVersions] = useState(demoVersions);
   const [health, setHealth] = useState(demoHealth);
   const [diagnosticReport, setDiagnosticReport] = useState(demoDiagnostics);
+  const [proxyTests, setProxyTests] = useState(null);
   const [busy, setBusy] = useState('');
   const [updateState, setUpdateState] = useState('idle');
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
@@ -150,6 +151,20 @@ export function App() {
     }, '只读诊断已完成');
   }
 
+  async function runProxyTests() {
+    setBusy('proxy-test');
+    try {
+      const report = await api.proxyTest();
+      setProxyTests(report);
+      const passed = [report?.tcp, report?.udp, report?.system_dns].filter((item) => item?.state === 'passed').length;
+      setToast({ tone: passed === 3 ? 'success' : 'warning', message: '真实代理测试完成：' + passed + '/3 通过' });
+    } catch (error) {
+      setToast({ tone: 'warning', message: error.message || '真实代理测试请求失败' });
+    } finally {
+      setBusy('');
+    }
+  }
+
   function copyText(text) {
     Promise.resolve(navigator.clipboard?.writeText(text)).catch(() => undefined);
     setToast({ tone: 'success', message: '已复制脱敏内容' });
@@ -246,7 +261,7 @@ export function App() {
   function renderPage() {
     if (page === 'routing') return <RoutingPage rules={rules} busy={busy} onSave={saveRule} onDelete={deleteRule} />;
     if (page === 'dns') return <DnsPage dns={dns} diagnostics={diagnosticReport} busy={busy} diagnosticsOpen={diagnosticsOpen} onRefresh={refreshDns} onDiagnose={() => runDoctor(true)} onCloseDiagnostics={() => setDiagnosticsOpen(false)} onCopy={copyText} />;
-    if (page === 'health') return <HealthPage health={health} diagnostics={diagnosticReport} versions={versions} busy={busy} updateState={updateState} onDiagnose={() => runDoctor(false)} onCopy={copyDiagnosticReport} onExport={exportReport} onCheckUpdate={checkUpdate} onUpgrade={upgrade} onRollback={rollback} />;
+    if (page === 'health') return <HealthPage health={health} diagnostics={diagnosticReport} proxyTests={proxyTests} versions={versions} busy={busy} updateState={updateState} onDiagnose={() => runDoctor(false)} onProxyTest={runProxyTests} onCopy={copyDiagnosticReport} onExport={exportReport} onCheckUpdate={checkUpdate} onUpgrade={upgrade} onRollback={rollback} />;
     if (page === 'pairing') return <PairingPage busy={busy} onValidate={validatePairing} onEnroll={enroll} onCopy={copyText} onComplete={() => setPage('connection')} />;
     return <ConnectionPage status={status} busy={busy} onDisconnect={disconnect} onReconnect={reconnect} onNavigate={setPage} />;
   }

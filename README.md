@@ -52,6 +52,16 @@ wg-proxy client \
 curl --proxy http://127.0.0.1:47101 https://icanhazip.com
 ~~~
 
+### Web UI 中的一键真实测试
+
+启动 TCP 与 UDP 客户端后，启动客户端 UI 并打开 `http://127.0.0.1:4173`：
+
+~~~sh
+./bin/wg-client-ui --listen 127.0.0.1:4173 --assets ui/client/dist
+~~~
+
+进入“健康与更新”，选择“开始真实测试”。UI 后台只会访问本机的 `127.0.0.1:47101` TCP 代理和 `127.0.0.1:47102` UDP 中继，分别验证真实公网出口、UDP DNS 往返，以及 UI 启动后系统 DNS 指纹是否保持不变；页面不会读取或显示令牌。
+
 UDP 服务端与客户端（与 TCP 使用相同令牌，默认同为 `9518`）：
 
 ~~~sh

@@ -58,7 +58,7 @@ async function request(path, options = {}) {
   const timeout = window.setTimeout(() => controller.abort(), 1800);
   let response;
   try {
-    response = await fetch(API_ROOT + path, {
+    response = await fetch(path.startsWith('/api/') ? path : API_ROOT + path, {
       ...options,
       headers: {
         Accept: 'application/json',
@@ -256,6 +256,7 @@ export const api = {
   deleteRule: (rule) => request('/rules/' + encodeURIComponent(rule.id), { method: 'DELETE', body: JSON.stringify({ operation_id: operationId(), ...(rule.revision == null ? {} : { expected_revision: rule.revision }) }) }),
   refreshDns: () => post('/dns/refresh').then((payload) => normalizeDns(payload?.dns || payload)),
   doctor: () => post('/diagnostics').then(normalizeDoctor),
+  proxyTest: () => request('/api/proxy/test', { method: 'POST' }),
   checkUpdate: () => post('/updates/check'),
   upgrade: () => post('/updates/upgrade'),
   rollback: () => post('/updates/rollback'),

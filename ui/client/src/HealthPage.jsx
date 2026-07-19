@@ -23,7 +23,7 @@ const healthIcons = {
   permissions: LockKey,
 };
 
-export function HealthPage({ health, diagnostics, versions, busy, updateState, onDiagnose, onCopy, onExport, onCheckUpdate, onUpgrade, onRollback }) {
+export function HealthPage({ health, diagnostics, proxyTests, versions, busy, updateState, onDiagnose, onProxyTest, onCopy, onExport, onCheckUpdate, onUpgrade, onRollback }) {
   return (
     <section className="page health-page" aria-labelledby="health-title">
       <h1 id="health-title">健康与更新</h1>
@@ -34,6 +34,17 @@ export function HealthPage({ health, diagnostics, versions, busy, updateState, o
         </button>
         <div><p>全面检查系统健康状况，包括隧道连接、分流、DNS、脚本环境与系统权限。</p><span>诊断时间：{diagnostics?.generatedAt || '尚未运行'}</span></div>
       </div>
+
+      <section className="health-results" aria-labelledby="proxy-test-title">
+        <div className="update-heading"><div><h2 id="proxy-test-title">真实代理联通测试</h2><p>测试本机已启动的 TCP 代理（127.0.0.1:47101）、UDP 中继（127.0.0.1:47102）和 UI 启动后的系统 DNS 状态；不会读取或显示令牌。</p></div><button className="button primary compact" type="button" disabled={busy === 'proxy-test'} onClick={onProxyTest}><Pulse className={busy === 'proxy-test' ? 'spin' : ''} size={19} />{busy === 'proxy-test' ? '测试中…' : '开始真实测试'}</button></div>
+        {proxyTests && <div className="health-table" role="table" aria-label="真实代理测试结果">
+          <div className="health-row health-head" role="row"><span role="columnheader">项目</span><span role="columnheader">状态</span><span role="columnheader">结果</span></div>
+          {[['TCP 代理', proxyTests.tcp], ['UDP 中继', proxyTests.udp], ['系统 DNS', proxyTests.system_dns]].map(([label, result]) => {
+            const passed = result?.state === 'passed';
+            return <div className="health-row" role="row" key={label}><span role="cell"><Pulse size={21} />{label}</span><span role="cell" className={'health-state ' + (passed ? 'normal' : 'degraded')}>{passed ? <CheckCircle size={17} weight="fill" /> : <Warning size={17} weight="fill" />}{passed ? '通过' : result?.state === 'unavailable' ? '不可用' : '失败'}</span><span role="cell">{result?.detail || '未返回结果'}{result?.exit_ip ? '；出口 ' + result.exit_ip : ''}</span></div>;
+          })}
+        </div>}
+      </section>
 
       <section className="health-results" aria-labelledby="health-results-title">
         <h2 id="health-results-title">诊断结果</h2>
