@@ -3,6 +3,8 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -15,6 +17,49 @@ func TestManagedDirectHostMatchesExactAndSuffix(t *testing.T) {
 	}
 	if matches("notexample.com", rules) {
 		t.Fatal("unrelated hostname matched direct rule")
+	}
+}
+
+func TestLoadToken(t *testing.T) {
+	if got, err := loadToken(" literal-token ", ""); err != nil || got != "literal-token" {
+		t.Fatalf("literal token = %q, %v", got, err)
+	}
+
+	path := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(path, []byte(" file-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := loadToken("", path); err != nil || got != "file-token" {
+		t.Fatalf("file token = %q, %v", got, err)
+	}
+	if _, err := loadToken("literal", path); err == nil {
+		t.Fatal("expected an error when both token inputs are configured")
+	}
+}
+
+func TestUDPPacketRoundTrip(t *testing.T) {
+	aead, err := udpAEAD("test-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := makeUDPRequest("127.0.0.1:5353", []byte("dns-query"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet, err := sealUDP(aead, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := openUDP(aead, packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, body, err := parseUDPRequest(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target != "127.0.0.1:5353" || string(body) != "dns-query" {
+		t.Fatalf("decoded UDP request = %q %q", target, body)
 	}
 }
 

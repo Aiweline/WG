@@ -9,8 +9,13 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/binary"
 	"errors"
 	"flag"
 	"fmt"
@@ -27,18 +32,222 @@ import (
 
 const authHeader = "Bearer "
 
+const (
+	udpMagic       = "WGUDP1"
+	udpRequest     = byte(1)
+	udpResponse    = byte(2)
+	maxUDPDatagram = 60 * 1024
+)
+
 func main() {
 	if len(os.Args) < 2 {
-		fatalf("usage: wg-proxy server|client [options]")
+		fatalf("usage: wg-proxy server|client|udp-server|udp-client [options]")
 	}
 	switch os.Args[1] {
 	case "server":
 		server(os.Args[2:])
 	case "client":
 		client(os.Args[2:])
+	case "udp-server":
+		udpServer(os.Args[2:])
+	case "udp-client":
+		udpClient(os.Args[2:])
 	default:
-		fatalf("usage: wg-proxy server|client [options]")
+		fatalf("usage: wg-proxy server|client|udp-server|udp-client [options]")
 	}
+}
+
+func udpServer(args []string) {
+	fs := flag.NewFlagSet("udp-server", flag.ExitOnError)
+	listen := fs.String("listen", ":9518", "UDP listen address")
+	token := fs.String("token", "", "required UDP token")
+	tokenFile := fs.String("token-file", "", "path to the required UDP token file")
+	fs.Parse(args)
+	resolvedToken, err := loadToken(*token, *tokenFile)
+	if err != nil || resolvedToken == "" {
+		fatalf("UDP server token: %v", err)
+	}
+	aead, err := udpAEAD(resolvedToken)
+	if err != nil {
+		fatalf("UDP server cipher: %v", err)
+	}
+	addr, err := net.ResolveUDPAddr("udp", *listen)
+	if err != nil {
+		fatalf("UDP listen address: %v", err)
+	}
+	conn, err := net.ListenUDP("udp", addr)
+	if err != nil {
+		fatalf("UDP listen: %v", err)
+	}
+	defer conn.Close()
+	log.Printf("WG UDP relay ready udp=%s", conn.LocalAddr())
+	buf := make([]byte, maxUDPDatagram)
+	for {
+		n, peer, err := conn.ReadFromUDP(buf)
+		if err != nil {
+			log.Printf("UDP read: %v", err)
+			continue
+		}
+		packet := append([]byte(nil), buf[:n]...)
+		go serveUDPDatagram(conn, peer, packet, aead)
+	}
+}
+
+func udpClient(args []string) {
+	fs := flag.NewFlagSet("udp-client", flag.ExitOnError)
+	listen := fs.String("listen", "127.0.0.1:47102", "local UDP relay listen address")
+	serverAddr := fs.String("server", "", "WG UDP server host:port")
+	target := fs.String("target", "", "required UDP destination host:port")
+	token := fs.String("token", "", "required UDP token")
+	tokenFile := fs.String("token-file", "", "path to the required UDP token file")
+	fs.Parse(args)
+	resolvedToken, err := loadToken(*token, *tokenFile)
+	if err != nil || *serverAddr == "" || *target == "" || resolvedToken == "" {
+		fatalf("UDP client requires -server, -target, and token: %v", err)
+	}
+	aead, err := udpAEAD(resolvedToken)
+	if err != nil {
+		fatalf("UDP client cipher: %v", err)
+	}
+	server, err := net.ResolveUDPAddr("udp", *serverAddr)
+	if err != nil {
+		fatalf("UDP server address: %v", err)
+	}
+	local, err := net.ResolveUDPAddr("udp", *listen)
+	if err != nil {
+		fatalf("UDP listen address: %v", err)
+	}
+	conn, err := net.ListenUDP("udp", local)
+	if err != nil {
+		fatalf("UDP listen: %v", err)
+	}
+	defer conn.Close()
+	log.Printf("WG UDP client ready relay=%s server=%s target=%s", conn.LocalAddr(), server, *target)
+	buf := make([]byte, maxUDPDatagram)
+	for {
+		n, peer, err := conn.ReadFromUDP(buf)
+		if err != nil {
+			log.Printf("UDP local read: %v", err)
+			continue
+		}
+		payload := append([]byte(nil), buf[:n]...)
+		go relayUDPDatagram(conn, peer, server, *target, payload, aead)
+	}
+}
+
+func udpAEAD(token string) (cipher.AEAD, error) {
+	key := sha256.Sum256([]byte(token))
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		return nil, err
+	}
+	return cipher.NewGCM(block)
+}
+
+func sealUDP(aead cipher.AEAD, payload []byte) ([]byte, error) {
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, err
+	}
+	packet := make([]byte, 0, len(udpMagic)+len(nonce)+len(payload)+aead.Overhead())
+	packet = append(packet, udpMagic...)
+	packet = append(packet, nonce...)
+	return aead.Seal(packet, nonce, payload, nil), nil
+}
+
+func openUDP(aead cipher.AEAD, packet []byte) ([]byte, error) {
+	if len(packet) < len(udpMagic)+aead.NonceSize()+aead.Overhead() || string(packet[:len(udpMagic)]) != udpMagic {
+		return nil, errors.New("invalid UDP packet")
+	}
+	nonce := packet[len(udpMagic) : len(udpMagic)+aead.NonceSize()]
+	return aead.Open(nil, nonce, packet[len(udpMagic)+aead.NonceSize():], nil)
+}
+
+func serveUDPDatagram(listener *net.UDPConn, peer *net.UDPAddr, packet []byte, aead cipher.AEAD) {
+	payload, err := openUDP(aead, packet)
+	if err != nil {
+		return
+	}
+	target, body, err := parseUDPRequest(payload)
+	if err != nil {
+		return
+	}
+	upstream, err := net.DialTimeout("udp", target, 10*time.Second)
+	if err != nil {
+		return
+	}
+	defer upstream.Close()
+	if _, err := upstream.Write(body); err != nil {
+		return
+	}
+	_ = upstream.SetReadDeadline(time.Now().Add(15 * time.Second))
+	response := make([]byte, maxUDPDatagram)
+	n, err := upstream.Read(response)
+	if err != nil {
+		return
+	}
+	sealed, err := sealUDP(aead, append([]byte{udpResponse}, response[:n]...))
+	if err == nil {
+		_, _ = listener.WriteToUDP(sealed, peer)
+		log.Printf("route=udp target=%s bytes=%d", target, n)
+	}
+}
+
+func relayUDPDatagram(listener *net.UDPConn, peer, server *net.UDPAddr, target string, body []byte, aead cipher.AEAD) {
+	payload, err := makeUDPRequest(target, body)
+	if err != nil {
+		return
+	}
+	packet, err := sealUDP(aead, payload)
+	if err != nil {
+		return
+	}
+	conn, err := net.DialUDP("udp", nil, server)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	if _, err := conn.Write(packet); err != nil {
+		return
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(20 * time.Second))
+	response := make([]byte, maxUDPDatagram)
+	n, err := conn.Read(response)
+	if err != nil {
+		return
+	}
+	plain, err := openUDP(aead, response[:n])
+	if err != nil || len(plain) < 1 || plain[0] != udpResponse {
+		return
+	}
+	_, _ = listener.WriteToUDP(plain[1:], peer)
+}
+
+func makeUDPRequest(target string, body []byte) ([]byte, error) {
+	if _, _, err := net.SplitHostPort(target); err != nil || len(target) > 0xffff {
+		return nil, errors.New("UDP target must be host:port")
+	}
+	payload := make([]byte, 3+len(target)+len(body))
+	payload[0] = udpRequest
+	binary.BigEndian.PutUint16(payload[1:3], uint16(len(target)))
+	copy(payload[3:], target)
+	copy(payload[3+len(target):], body)
+	return payload, nil
+}
+
+func parseUDPRequest(payload []byte) (string, []byte, error) {
+	if len(payload) < 3 || payload[0] != udpRequest {
+		return "", nil, errors.New("invalid UDP request")
+	}
+	n := int(binary.BigEndian.Uint16(payload[1:3]))
+	if n == 0 || len(payload) < 3+n {
+		return "", nil, errors.New("invalid UDP target")
+	}
+	target := string(payload[3 : 3+n])
+	if _, _, err := net.SplitHostPort(target); err != nil {
+		return "", nil, errors.New("invalid UDP target")
+	}
+	return target, payload[3+n:], nil
 }
 
 func server(args []string) {
@@ -47,8 +256,13 @@ func server(args []string) {
 	cert := fs.String("cert", "", "PEM certificate path")
 	key := fs.String("key", "", "PEM private key path")
 	token := fs.String("token", "", "required proxy token")
+	tokenFile := fs.String("token-file", "", "path to the required proxy token file")
 	fs.Parse(args)
-	if *cert == "" || *key == "" || *token == "" {
+	resolvedToken, err := loadToken(*token, *tokenFile)
+	if err != nil {
+		fatalf("server token: %v", err)
+	}
+	if *cert == "" || *key == "" || resolvedToken == "" {
 		fatalf("server requires -cert, -key, and -token")
 	}
 	pair, err := tls.LoadX509KeyPair(*cert, *key)
@@ -60,10 +274,26 @@ func server(args []string) {
 		fatalf("listen: %v", err)
 	}
 	log.Printf("WG data plane server ready tls=%s", listener.Addr())
-	h := proxyHandler{token: *token, transport: &http.Transport{Proxy: nil}}
+	h := proxyHandler{token: resolvedToken, transport: &http.Transport{Proxy: nil}}
 	if err := (&http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second}).Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		fatalf("serve: %v", err)
 	}
+}
+
+func loadToken(token, tokenFile string) (string, error) {
+	token = strings.TrimSpace(token)
+	tokenFile = strings.TrimSpace(tokenFile)
+	if token != "" && tokenFile != "" {
+		return "", errors.New("choose either -token or -token-file")
+	}
+	if tokenFile == "" {
+		return token, nil
+	}
+	contents, err := os.ReadFile(tokenFile)
+	if err != nil {
+		return "", fmt.Errorf("read token file: %w", err)
+	}
+	return strings.TrimSpace(string(contents)), nil
 }
 
 func client(args []string) {
@@ -73,9 +303,14 @@ func client(args []string) {
 	serverName := fs.String("server-name", "", "TLS server name override (for an SSH test forward)")
 	ca := fs.String("ca", "", "PEM server certificate for verification")
 	token := fs.String("token", "", "proxy token")
+	tokenFile := fs.String("token-file", "", "path to the proxy token file")
 	direct := fs.String("direct-host", "", "comma-separated host suffixes to bypass the tunnel")
 	fs.Parse(args)
-	if *serverAddr == "" || *ca == "" || *token == "" {
+	resolvedToken, err := loadToken(*token, *tokenFile)
+	if err != nil {
+		fatalf("client token: %v", err)
+	}
+	if *serverAddr == "" || *ca == "" || resolvedToken == "" {
 		fatalf("client requires -server, -ca, and -token")
 	}
 	pem, err := os.ReadFile(*ca)
@@ -95,7 +330,7 @@ func client(args []string) {
 	if *serverName != "" {
 		tlsConfig.ServerName = *serverName
 	}
-	c := clientProxy{server: *serverAddr, token: *token, tls: tlsConfig, direct: splitCSV(*direct)}
+	c := clientProxy{server: *serverAddr, token: resolvedToken, tls: tlsConfig, direct: splitCSV(*direct)}
 	for {
 		conn, err := ln.Accept()
 		if err != nil {

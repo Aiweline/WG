@@ -6,16 +6,15 @@
 
 [WG](https://github.com/Aiweline/WG) 是一个使用 Go 开发的轻量级智能分流私有隧道项目。客户端提供图形界面，服务端通过脚本和命令行管理；域名、IP 和 CIDR 的分流结果可以随时调整，删除人工覆盖项后会重新交给 <code>AUTO</code> 智能分类。
 
-> [!WARNING]
-> **当前仓库是安全开发基线，不是可投入生产的 VPN。**  
-> 现阶段不会创建 UDP 数据通道、TUN 设备、系统路由、防火墙或 NAT 规则，也不会转发真实流量。“填写服务器 IP 即可连接”是产品目标交互；当前版本用于验证协议组件、控制面、客户端界面与安全边界。
+> [!NOTE]
+> WG 提供可用的 TCP 代理和加密 UDP 中继；它不创建 TUN、系统路由、防火墙或 NAT 规则，因此不会污染系统 DNS。它不是 WireGuard 兼容实现，也不应被配置为系统级全局 VPN。
 
-## 实验性真实数据面
+## TCP / UDP 数据面
 
-仓库提供 `wg-proxy`，用于端到端验证真实流量：客户端只监听回环 HTTP 代理端口，使用 TLS 连接到服务端；服务端在认证后处理 HTTP 和 HTTPS CONNECT 请求并实际连接目标站点。客户端的 `-direct-host` 规则支持按域名后缀绕过隧道，整个过程不修改系统 DNS、路由或防火墙。
+`wg-proxy` 是实际数据面：TCP 模式为 TLS 保护、令牌认证的 HTTP/HTTPS CONNECT 代理；UDP 模式为令牌认证、AES-256-GCM 保护的请求/响应 UDP 中继。TCP 和 UDP 可同时使用同一个端口号 `9518`（分别占用 TCP/UDP 协议），客户端仅监听回环地址。`-direct-host` 支持 TCP 的按域名后缀直连，整个过程不修改系统 DNS、路由或防火墙。
 
-> [!CAUTION]
-> 这是实验性 HTTP 代理数据面，不是完整 VPN/TUN 实现。生产部署仍需要正式的密钥生命周期、配置持久化、限流、审计与独立安全审计。
+> [!IMPORTANT]
+> UDP 中继要求客户端明确指定 `-target host:port`，适用于 DNS、游戏或其他固定 UDP 服务。它不是透明 UDP/TUN；服务端令牌和证书必须通过安全渠道发放并定期轮换。
 
 服务端示例：
 
@@ -26,6 +25,19 @@ wg-proxy server \
   -key ./server-key.pem \
   -token "$WG_PROXY_TOKEN"
 ~~~
+
+长期运行时，使用只允许服务账户读取的令牌文件，避免令牌出现在进程参数中：
+
+~~~sh
+chmod 600 /etc/wg-proxy/token
+wg-proxy server \
+  -listen <private-interface-ip>:9518 \
+  -cert /etc/wg-proxy/server-cert.pem \
+  -key /etc/wg-proxy/server-key.pem \
+  -token-file /etc/wg-proxy/token
+~~~
+
+如果本机已有服务占用 `127.0.0.1:9518`，WG 可以仅绑定服务器私网网卡地址；公网 EIP/NAT 仍可将 TCP 9518 转到该监听，不会影响该回环服务。
 
 客户端示例：
 
@@ -38,6 +50,20 @@ wg-proxy client \
   -direct-host example.com
 
 curl --proxy http://127.0.0.1:47101 https://icanhazip.com
+~~~
+
+UDP 服务端与客户端（与 TCP 使用相同令牌，默认同为 `9518`）：
+
+~~~sh
+# server: UDP/9518
+wg-proxy udp-server -listen :9518 -token-file /etc/wg-proxy/token
+
+# client: expose a loopback UDP relay for one selected destination
+wg-proxy udp-client \
+  -listen 127.0.0.1:47102 \
+  -server SERVER_IP:9518 \
+  -target 1.1.1.1:53 \
+  -token "$WG_PROXY_TOKEN"
 ~~~
 
 ## 一键安装脚本

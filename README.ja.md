@@ -6,9 +6,24 @@
 
 [WG](https://github.com/Aiweline/WG) は、Go で開発されている軽量なインテリジェント・スプリットトンネリングプロジェクトです。クライアントにはグラフィカル UI を用意し、サーバーはスクリプトとコマンドラインで管理します。ドメイン、IP、CIDR の判定は後から変更でき、手動上書きを削除すると <code>AUTO</code> の自動分類へ戻ります。
 
-> [!WARNING]
-> **このリポジトリは安全な開発用ベースラインであり、本番利用可能な VPN ではありません。**  
-> 現在は UDP データチャネル、TUN デバイス、システムルート、ファイアウォール、NAT を作成せず、実トラフィックも転送しません。「サーバー IP を入力して接続」は目標操作であり、現行ビルドはプロトコル部品、制御プレーン、クライアント UI、安全境界の検証を目的としています。
+> [!NOTE]
+> WG は実用的な TCP プロキシと暗号化 UDP リレーを提供します。TUN、システムルート、ファイアウォール、NAT を作成しないため、システム DNS を変更しません。WireGuard 互換ではなく、システム全体の VPN として扱ってはいけません。
+
+## TCP / UDP データプレーン
+
+`wg-proxy` は実トラフィックを転送します。TCP モードは TLS 保護・トークン認証付き HTTP/HTTPS CONNECT プロキシ、UDP モードはトークン認証・AES-256-GCM 保護の要求/応答リレーです。TCP と UDP は別プロトコルのため、同じポート番号 `9518` を同時に使用できます。
+
+```sh
+# TCP サーバーとローカル HTTP プロキシクライアント
+wg-proxy server -listen :9518 -cert ./server-cert.pem -key ./server-key.pem -token-file /etc/wg-proxy/token
+wg-proxy client -listen 127.0.0.1:47101 -server SERVER_IP:9518 -ca ./server-cert.pem -token-file ./token
+
+# UDP サーバーと、指定 UDP 宛先用のローカルリレー
+wg-proxy udp-server -listen :9518 -token-file /etc/wg-proxy/token
+wg-proxy udp-client -listen 127.0.0.1:47102 -server SERVER_IP:9518 -target 1.1.1.1:53 -token-file ./token
+```
+
+UDP は明示的な `-target host:port` が必要です。DNS、ゲームなど固定 UDP サービス向けであり、透過 UDP/TUN 実装ではありません。
 
 ## 主な考え方
 

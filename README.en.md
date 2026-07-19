@@ -6,9 +6,24 @@
 
 [WG](https://github.com/Aiweline/WG) is a lightweight intelligent split-tunneling project written in Go. The client has a graphical interface, while the server is managed through scripts and command-line tools. Domain, IP, and CIDR decisions remain editable; deleting a manual override returns the destination to <code>AUTO</code> classification.
 
-> [!WARNING]
-> **This repository is a safe development baseline, not a production-ready VPN.**  
-> It does not currently create a UDP data channel, TUN device, system routes, firewall or NAT rules, and it does not forward real traffic. “Enter a server IP and connect” is the target workflow; the current build validates protocol components, the control plane, the client UI, and safety boundaries.
+> [!NOTE]
+> WG provides a usable TCP proxy and encrypted UDP relay. It does not create a TUN device, system routes, firewall, or NAT rules, so it does not alter system DNS. It is not WireGuard-compatible and must not be represented as a system-wide VPN.
+
+## TCP / UDP data plane
+
+`wg-proxy` carries real traffic: TCP mode is a TLS-protected, token-authenticated HTTP/HTTPS CONNECT proxy; UDP mode is a token-authenticated AES-256-GCM protected request/response relay. TCP and UDP can use the same port number, `9518`, because they use separate network protocols.
+
+```sh
+# TCP server and local HTTP proxy client
+wg-proxy server -listen :9518 -cert ./server-cert.pem -key ./server-key.pem -token-file /etc/wg-proxy/token
+wg-proxy client -listen 127.0.0.1:47101 -server SERVER_IP:9518 -ca ./server-cert.pem -token-file ./token
+
+# UDP server and a local relay for a selected UDP target
+wg-proxy udp-server -listen :9518 -token-file /etc/wg-proxy/token
+wg-proxy udp-client -listen 127.0.0.1:47102 -server SERVER_IP:9518 -target 1.1.1.1:53 -token-file ./token
+```
+
+UDP requires an explicit `-target host:port`; it is suited to DNS, games, and other fixed UDP services, not a transparent UDP/TUN implementation.
 
 ## Core Ideas
 
