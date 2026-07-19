@@ -7,17 +7,33 @@ import { HealthPage } from './HealthPage.jsx';
 import { Layout } from './Layout.jsx';
 import { PairingPage } from './PairingPage.jsx';
 import { RoutingPage } from './RoutingPage.jsx';
-import {
-  demoDns,
-  demoDiagnostics,
-  demoHealth,
-  demoRules,
-  demoStatus,
-  demoVersions,
-  serverFingerprint,
-} from './demoData.js';
 
-const delay = (milliseconds) => new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+const emptyStatus = {
+  connection: 'disconnected',
+  endpoint: '请选择服务器',
+  duration: '—',
+  uploaded: '—',
+  downloaded: '—',
+  routingMode: 'AUTO',
+  dnsUnchanged: true,
+  dnsState: 'ready',
+  proxyRuntime: true,
+};
+
+const emptyDns = {
+  state: 'ready',
+  snapshotId: '—',
+  generatedAt: '—',
+  lastSync: '—',
+  generation: 0,
+  upstreams: [],
+  cacheEntries: 0,
+  hitRate: '—',
+  ttl: '—',
+  unchanged: true,
+};
+
+const localVersions = { bundle: '—', core: '—', ui: '1.0.0', scripts: '—', latest: '—', platform: 'local' };
 
 function signedUpdateCandidate(result) {
   const latest = result?.available_version || result?.latest || result?.latest_version || result?.version;
@@ -31,14 +47,15 @@ function signedUpdateCandidate(result) {
 export function App() {
   const [page, setPage] = useState('connection');
   const [backendMode, setBackendMode] = useState('checking');
-  const [status, setStatus] = useState(demoStatus);
-  const [rules, setRules] = useState(demoRules);
-  const [dns, setDns] = useState(demoDns);
-  const [versions, setVersions] = useState(demoVersions);
-  const [health, setHealth] = useState(demoHealth);
-  const [diagnosticReport, setDiagnosticReport] = useState(demoDiagnostics);
+  const [status, setStatus] = useState(emptyStatus);
+  const [rules, setRules] = useState([]);
+  const [dns, setDns] = useState(emptyDns);
+  const [versions, setVersions] = useState(localVersions);
+  const [health, setHealth] = useState([]);
+  const [diagnosticReport, setDiagnosticReport] = useState(null);
   const [proxyTests, setProxyTests] = useState(null);
-  const [proxyRuntime, setProxyRuntime] = useState({ tcp_listener: false, udp_listener: false });
+  const [proxyRuntime, setProxyRuntime] = useState({ configured: false, connected: false, tcp_listener: false, udp_listener: false, servers: [], transport: 'tcp', udp_target: '1.1.1.1:53' });
+  const [proxyConfig, setProxyConfig] = useState({ servers: [], selected_endpoint: '', transport: 'tcp', udp_target: '1.1.1.1:53' });
   const [busy, setBusy] = useState('');
   const [updateState, setUpdateState] = useState('idle');
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
@@ -61,8 +78,7 @@ export function App() {
         setBackendMode('live');
       } catch {
         if (!active) return;
-        setBackendMode('demo');
-        setToast({ tone: 'info', message: '后台 API 未响应，已进入安全演示模式；操作不会修改真实网络或系统 DNS。' });
+        setBackendMode('proxy');
       }
     }
     load();
@@ -71,18 +87,28 @@ export function App() {
 
   useEffect(() => {
     let active = true;
+    function applyRuntime(runtime) {
+      setProxyRuntime(runtime);
+      setStatus((current) => ({
+        ...current,
+        connection: runtime?.connected ? 'connected' : 'disconnected',
+        endpoint: runtime?.selected_endpoint || '请选择服务器',
+        duration: runtime?.started_at ? '运行中' : '—',
+        uploaded: '—',
+        downloaded: '—',
+        routingMode: String(runtime?.transport || 'tcp').toUpperCase(),
+        dnsState: 'ready',
+        proxyRuntime: true,
+      }));
+    }
     async function loadProxyRuntime() {
       try {
-        const runtime = await api.proxyStatus();
+        const [runtime, config] = await Promise.all([api.proxyStatus(), api.proxyConfig()]);
         if (!active) return;
-        setProxyRuntime(runtime);
-        if (runtime?.tcp_listener) {
-          setStatus((current) => ({ ...current, connection: 'connected', endpoint: '本机 TCP 代理 127.0.0.1:47101', duration: '—', uploaded: '—', downloaded: '—', dnsState: 'ready', proxyRuntime: true }));
-        } else {
-          setStatus((current) => ({ ...current, connection: 'disconnected', endpoint: '本机代理未启动', duration: '—', uploaded: '—', downloaded: '—', proxyRuntime: true }));
-        }
+        applyRuntime(runtime);
+        setProxyConfig(config);
       } catch {
-        // The normal core UI remains available when its local host is not running.
+        if (active) setToast({ tone: 'warning', message: '本机代理控制后台不可用，请重新启动 WG Web UI。' });
       }
     }
     loadProxyRuntime();
@@ -97,20 +123,21 @@ export function App() {
   }, [toast]);
 
   async function perform(key, apiCall, localUpdate, successMessage) {
+    if (backendMode !== 'live') {
+      setToast({ tone: 'warning', message: '该管理功能需要 wg-core；没有执行模拟操作。代理连接仍可在连接页使用。' });
+      return false;
+    }
     setBusy(key);
-    const live = backendMode === 'live';
     try {
-      let response;
-      if (live) response = await apiCall();
-      else await delay(520);
-      localUpdate(response, live);
-      const resolvedMessage = typeof successMessage === 'function' ? successMessage(response, live) : successMessage;
-      if (resolvedMessage) setToast({ tone: 'success', message: resolvedMessage + (live ? '' : '（演示）') });
+      const response = await apiCall();
+      localUpdate(response, true);
+      const resolvedMessage = typeof successMessage === 'function' ? successMessage(response, true) : successMessage;
+      if (resolvedMessage) setToast({ tone: 'success', message: resolvedMessage });
       return true;
     } catch (error) {
       if (error instanceof ApiUnavailableError) {
-        setBackendMode('demo');
-        setToast({ tone: 'warning', message: '后台响应中断，无法确认操作结果；本地状态未更新，已切换到安全演示模式。重新连接后台后请核实。' });
+        setBackendMode('proxy');
+        setToast({ tone: 'warning', message: 'wg-core 响应中断，管理操作未执行；真实代理连接不受影响。' });
       } else {
         setToast({ tone: 'warning', message: error.status === 501 ? '后台已明确返回：此版本尚未实现该操作。没有执行升级或回滚。' : error.message });
       }
@@ -120,12 +147,77 @@ export function App() {
     }
   }
 
+  function applyProxyRuntime(runtime) {
+    setProxyRuntime(runtime);
+    setStatus((current) => ({
+      ...current,
+      connection: runtime?.connected ? 'connected' : 'disconnected',
+      endpoint: runtime?.selected_endpoint || '请选择服务器',
+      duration: runtime?.started_at ? '运行中' : '—',
+      routingMode: String(runtime?.transport || 'tcp').toUpperCase(),
+      dnsState: 'ready',
+      proxyRuntime: true,
+    }));
+  }
+
+  async function connectProxy(config) {
+    setBusy('connect');
+    try {
+      const saved = await api.saveProxyConfig(config);
+      setProxyConfig(saved);
+      const runtime = await api.proxyConnect();
+      applyProxyRuntime(runtime);
+      setToast({ tone: 'success', message: '已连接 ' + runtime.selected_endpoint + '（' + String(runtime.transport).toUpperCase() + '）' });
+      return true;
+    } catch (error) {
+      setToast({ tone: 'warning', message: error.message || '连接失败' });
+      return false;
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function saveProxyConfig(config) {
+    setBusy('save-server');
+    try {
+      const saved = await api.saveProxyConfig(config);
+      setProxyConfig(saved);
+      const runtime = await api.proxyStatus();
+      applyProxyRuntime(runtime);
+      setToast({ tone: 'success', message: '服务器配置已保存' });
+      return true;
+    } catch (error) {
+      setToast({ tone: 'warning', message: error.message || '保存失败' });
+      return false;
+    } finally {
+      setBusy('');
+    }
+  }
+
   async function disconnect() {
-    await perform('disconnect', api.disconnect, () => setStatus((current) => ({ ...current, connection: 'disconnected', duration: '—' })), '隧道已安全断开，系统 DNS 保持原样');
+    setBusy('disconnect');
+    try {
+      const runtime = await api.proxyDisconnect();
+      applyProxyRuntime(runtime);
+      setToast({ tone: 'success', message: '代理已断开，系统 DNS 保持原样' });
+    } catch (error) {
+      setToast({ tone: 'warning', message: error.message || '断开失败' });
+    } finally {
+      setBusy('');
+    }
   }
 
   async function reconnect() {
-    await perform('reconnect', api.reconnect, () => setStatus((current) => ({ ...current, connection: 'connected', duration: '00:00:01' })), '已使用新会话重新连接');
+    setBusy('reconnect');
+    try {
+      const runtime = await api.proxyReconnect();
+      applyProxyRuntime(runtime);
+      setToast({ tone: 'success', message: '已重新连接 ' + runtime.selected_endpoint });
+    } catch (error) {
+      setToast({ tone: 'warning', message: error.message || '重新连接失败' });
+    } finally {
+      setBusy('');
+    }
   }
 
   async function saveRule(rule) {
@@ -165,10 +257,9 @@ export function App() {
   }
 
   async function runDoctor(openDialog = false) {
-    await perform('doctor', api.doctor, (liveReport, live) => {
-      const report = live ? liveReport : { ...demoDiagnostics, health: demoHealth.map((item) => ({ ...item })) };
-      setDiagnosticReport(report);
-      setHealth(report.health);
+    await perform('doctor', api.doctor, (liveReport, _live) => {
+      setDiagnosticReport(liveReport);
+      setHealth(liveReport.health);
       if (openDialog) setDiagnosticsOpen(true);
     }, '只读诊断已完成');
   }
@@ -221,16 +312,11 @@ export function App() {
   }
 
   async function checkUpdate() {
-    await perform('check-update', api.checkUpdate, (result, live) => {
-      if (!live) {
-        setUpdateState('available');
-        return;
-      }
+    await perform('check-update', api.checkUpdate, (result, _live) => {
       const { latest, available } = signedUpdateCandidate(result);
       setUpdateState(available ? 'available' : 'unavailable');
       if (latest) setVersions((current) => ({ ...current, latest }));
-    }, (result, live) => {
-      if (!live) return '演示模式已模拟发现 Bundle ' + versions.latest;
+    }, (result, _live) => {
       const { latest, available } = signedUpdateCandidate(result);
       if (available) return '签名清单验证完成，发现 Bundle ' + (latest || versions.latest);
       return result?.message || result?.reason || '未发现经过签名验证的可用更新；没有执行升级。';
@@ -249,24 +335,15 @@ export function App() {
 
   async function rollback() {
     await perform('rollback', api.rollback, () => {
-      setVersions(demoVersions);
+      setVersions(localVersions);
       setUpdateState('idle');
     }, '已回滚到上一个验证版本，系统 DNS 未修改');
   }
 
   async function validatePairing(payload) {
     let validation = null;
-    const ok = await perform('pairing', () => api.validatePairing(payload), (liveValidation, live) => {
-      const candidate = live ? liveValidation : {
-        valid: true,
-        validationId: 'demo-validation-' + Date.now(),
-        serverIp: payload.serverIp.trim(),
-        port: 9518,
-        fileName: payload.fileName,
-        fingerprint: serverFingerprint,
-        expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
-        message: '安全演示验证，不会读取真实配对文件。',
-      };
+    const ok = await perform('pairing', () => api.validatePairing(payload), (liveValidation, _live) => {
+      const candidate = liveValidation;
       if (candidate?.valid && candidate.validationId && candidate.serverIp && candidate.port && candidate.fileName && candidate.fingerprint && candidate.expiresAt) {
         validation = { ...candidate, requestedServerIp: payload.serverIp.trim(), requestedFileName: payload.fileName };
       }
@@ -285,7 +362,7 @@ export function App() {
     if (page === 'dns') return <DnsPage dns={dns} diagnostics={diagnosticReport} busy={busy} diagnosticsOpen={diagnosticsOpen} onRefresh={refreshDns} onDiagnose={() => runDoctor(true)} onCloseDiagnostics={() => setDiagnosticsOpen(false)} onCopy={copyText} />;
     if (page === 'health') return <HealthPage health={health} diagnostics={diagnosticReport} proxyTests={proxyTests} versions={versions} busy={busy} updateState={updateState} onDiagnose={() => runDoctor(false)} onProxyTest={runProxyTests} onCopy={copyDiagnosticReport} onExport={exportReport} onCheckUpdate={checkUpdate} onUpgrade={upgrade} onRollback={rollback} />;
     if (page === 'pairing') return <PairingPage busy={busy} onValidate={validatePairing} onEnroll={enroll} onCopy={copyText} onComplete={() => setPage('connection')} />;
-    return <ConnectionPage status={status} busy={busy} onDisconnect={disconnect} onReconnect={reconnect} onNavigate={setPage} />;
+    return <ConnectionPage status={status} proxyRuntime={proxyRuntime} proxyConfig={proxyConfig} busy={busy} onConnect={connectProxy} onSaveConfig={saveProxyConfig} onDisconnect={disconnect} onReconnect={reconnect} onNavigate={setPage} />;
   }
 
   return (

@@ -52,15 +52,35 @@ wg-proxy client \
 curl --proxy http://127.0.0.1:47101 https://icanhazip.com
 ~~~
 
-### Web UI 中的一键真实测试
+### Web UI 配置服务器并连接
 
-启动 TCP 与 UDP 客户端后，启动客户端 UI 并打开 `http://127.0.0.1:4173`：
+把服务端证书和令牌放入客户端私有目录，然后启动 Web UI：
+
+~~~sh
+mkdir -p ~/.wg-client
+chmod 700 ~/.wg-client
+cp server-cert.pem ~/.wg-client/server-cert.pem
+cp token ~/.wg-client/token
+chmod 600 ~/.wg-client/server-cert.pem ~/.wg-client/token
+~~~
 
 ~~~sh
 ./bin/wg-client-ui --listen 127.0.0.1:4173 --assets ui/client/dist
 ~~~
 
-进入“健康与更新”，选择“开始真实测试”。UI 后台只会访问本机的 `127.0.0.1:47101` TCP 代理和 `127.0.0.1:47102` UDP 中继，分别验证真实公网出口、UDP DNS 往返，以及 UI 启动后系统 DNS 指纹是否保持不变；页面不会读取或显示令牌。
+打开 `http://127.0.0.1:4173`，在“连接”页添加或选择服务器，填写服务器 IP、端口（默认 `9518`）并选择 TCP、UDP 或 TCP + UDP。点击“连接服务器”后，Web UI 会调用同目录下的 `wg-proxy`，真实启动本机 `127.0.0.1:47101` TCP 代理和/或 `127.0.0.1:47102` UDP 中继。服务器列表保存在 `~/.wg-client/config.json`，不会写入页面存储，也不会修改系统 DNS。
+
+如果二进制或状态目录不在默认位置，可显式指定：
+
+~~~sh
+./bin/wg-client-ui \
+  --listen 127.0.0.1:4173 \
+  --assets ui/client/dist \
+  --proxy-bin ./bin/wg-proxy \
+  --proxy-state ~/.wg-client
+~~~
+
+进入“健康与更新”，选择“开始真实测试”，可验证真实公网出口、UDP DNS 往返，以及 UI 启动后系统 DNS 指纹是否保持不变；页面不会读取或显示令牌。
 
 UDP 服务端与客户端（与 TCP 使用相同令牌，默认同为 `9518`）：
 

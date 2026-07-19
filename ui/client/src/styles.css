@@ -523,6 +523,148 @@ h2 {
   font-size: 18px;
 }
 
+.server-config-card {
+  margin-top: 28px;
+  padding: 26px 28px 28px;
+  background: #fbfcfb;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+}
+
+.server-config-heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.server-config-heading h2 {
+  margin: 5px 0 5px;
+  font-size: 24px;
+}
+
+.server-config-heading p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.config-state {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  color: var(--muted);
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 12px;
+}
+
+.config-state.connected {
+  color: #087a47;
+  background: var(--green-soft);
+  border-color: #a9dec0;
+}
+
+.server-picker-row {
+  margin-top: 24px;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
+.server-picker-row > label,
+.server-config-grid label {
+  color: #47535d;
+  font-size: 14px;
+  font-weight: 630;
+}
+
+.server-picker-row > div {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 10px;
+}
+
+.server-picker-row select,
+.server-config-grid input,
+.server-config-grid select {
+  width: 100%;
+  min-height: 46px;
+  padding: 0 13px;
+  color: var(--ink);
+  background: #fff;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+}
+
+.icon-danger-button {
+  width: 46px;
+  height: 46px;
+  display: grid;
+  place-items: center;
+  color: var(--red);
+  background: #fff;
+  border: 1px solid #edc5c2;
+  border-radius: 6px;
+}
+
+.icon-danger-button:hover:not(:disabled) {
+  background: var(--red-soft);
+}
+
+.server-config-grid {
+  margin-top: 18px;
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(210px, 1.2fr) minmax(100px, 0.55fr) minmax(160px, 0.8fr);
+  gap: 16px;
+}
+
+.server-config-grid label {
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+
+.server-config-grid .udp-target-field {
+  grid-column: 1 / -1;
+}
+
+.server-config-grid small {
+  color: var(--muted);
+  font-weight: 400;
+  line-height: 1.45;
+}
+
+.form-error,
+.form-note {
+  margin: 16px 0 0;
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.form-error {
+  color: #a62b2b;
+  background: var(--red-soft);
+  border: 1px solid #efc6c3;
+}
+
+.form-note {
+  color: #765000;
+  background: var(--amber-soft);
+  border: 1px solid #edcb82;
+}
+
+.server-config-actions {
+  margin-top: 22px;
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
 /* Routing */
 .routing-page {
   padding-right: clamp(34px, 4vw, 62px);
@@ -1497,6 +1639,8 @@ h2 {
 @media (max-width: 1050px) {
   .desktop-frame { grid-template-columns: 218px minmax(0, 1fr); }
   .nav-item { padding-inline: 18px; gap: 13px; font-size: 16px; }
+  .server-config-grid { grid-template-columns: 1fr 1fr; }
+  .server-config-grid .udp-target-field { grid-column: 1 / -1; }
   .rule-toolbar { grid-template-columns: 1fr 1fr 1fr; }
   .search-field { grid-column: span 2; }
   .rule-toolbar .button { grid-column: 3; grid-row: 1; }
@@ -1528,6 +1672,15 @@ h2 {
   .connection-details dt { gap: 12px; font-size: 15px; }
   .connection-details dd { font-size: 16px; }
   .connection-actions { grid-template-columns: 1fr; gap: 12px; }
+  .server-config-card { padding: 21px 18px 23px; }
+  .server-config-heading { display: block; }
+  .config-state { display: inline-block; margin-top: 12px; }
+  .server-picker-row { grid-template-columns: 1fr; gap: 8px; }
+  .server-picker-row > div { grid-template-columns: minmax(0, 1fr) auto; }
+  .server-picker-row .icon-danger-button { grid-column: 2; }
+  .server-config-grid { grid-template-columns: 1fr; }
+  .server-config-grid .udp-target-field { grid-column: auto; }
+  .server-config-actions { display: grid; grid-template-columns: 1fr; }
   .rule-toolbar { grid-template-columns: 1fr 1fr; }
   .search-field, .rule-toolbar .button { grid-column: span 2; grid-row: auto; }
   .dns-proof { grid-template-columns: auto 1fr; }

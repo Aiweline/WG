@@ -78,6 +78,8 @@ UDP / TUN / system routes / firewall / NAT
 
 The client contains five views: Connection, Intelligent Routing, Private DNS, Health & Updates, and First Pairing. More prototypes are available in [docs/ui-prototypes](./docs/ui-prototypes).
 
+The Connection view is operational, not a mock. Put `server-cert.pem` and `token` (mode `0600`) in `~/.wg-client`, start `./bin/wg-client-ui`, then add or select a server IP, port (default `9518`), and TCP/UDP mode. The UI stores server profiles locally and starts the sibling `wg-proxy` binary on `127.0.0.1:47101` (TCP) and/or `127.0.0.1:47102` (UDP) without changing the system DNS.
+
 ## Requirements
 
 - Go 1.26+

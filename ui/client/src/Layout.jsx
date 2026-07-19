@@ -70,16 +70,14 @@ export function Layout({ page, onNavigate, backendMode, proxyRuntime, status, ve
         <header className="window-bar" aria-label="窗口栏">
           {backendMode === 'checking' ? (
             <span className="backend-chip checking"><CircleNotch className="spin" size={16} /> 正在连接后台</span>
-          ) : proxyRuntime?.tcp_listener ? (
-            <span className="backend-chip live" title="本机 TCP 代理已监听；管理核心仍可能处于演示模式">
-              真实代理已运行{proxyRuntime.udp_listener ? ' · TCP/UDP' : ' · TCP'}
+          ) : proxyRuntime?.connected ? (
+            <span className="backend-chip live" title="本机代理进程已监听">
+              真实代理已运行 · {proxyRuntime.tcp_listener && proxyRuntime.udp_listener ? 'TCP/UDP' : proxyRuntime.udp_listener ? 'UDP' : 'TCP'}
             </span>
-          ) : backendMode === 'demo' ? (
-            <span className="backend-chip demo" title="所有操作只保存在当前浏览器会话，不会修改真实网络或系统 DNS">
-              安全演示 · 不修改系统
-            </span>
-          ) : (
+          ) : backendMode === 'live' ? (
             <span className="backend-chip live">后台在线</span>
+          ) : (
+            <span className="backend-chip">代理控制台 · 未连接</span>
           )}
           <div className="window-actions" aria-hidden="true">
             <Minus size={18} />
@@ -89,9 +87,9 @@ export function Layout({ page, onNavigate, backendMode, proxyRuntime, status, ve
         </header>
 
         <main className="content" id="main-content">
-          {backendMode === 'demo' && (
+          {backendMode === 'proxy' && (
             <p className="sr-only" role="status">
-              当前为安全演示模式，操作不会发送到系统网络、路由或 DNS 配置。
+              管理核心未运行；连接页的服务器配置和代理控制仍然可用。
             </p>
           )}
           {children}

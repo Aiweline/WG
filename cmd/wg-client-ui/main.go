@@ -39,6 +39,8 @@ func run() error {
 	listenAddress := flag.String("listen", "127.0.0.1:4173", "loopback UI address")
 	assetsPath := flag.String("assets", "ui/client/dist", "built UI asset directory")
 	coreURL := flag.String("core", "http://127.0.0.1:47003", "loopback wg-core URL")
+	proxyState := flag.String("proxy-state", "", "WG proxy client state directory")
+	proxyBinary := flag.String("proxy-bin", "", "wg-proxy binary path")
 	flag.Parse()
 	if err := requireLoopback(*listenAddress); err != nil {
 		return err
@@ -57,6 +59,20 @@ func run() error {
 	if _, err := os.Stat(filepath.Join(root, "index.html")); err != nil {
 		return fmt.Errorf("UI is not built at %s; run npm run build in ui/client: %w", root, err)
 	}
+	if *proxyState == "" {
+		*proxyState, err = defaultProxyStateDir()
+		if err != nil {
+			return fmt.Errorf("proxy state: %w", err)
+		}
+	}
+	if *proxyBinary == "" {
+		*proxyBinary, err = defaultProxyBinary()
+		if err != nil {
+			return fmt.Errorf("proxy binary: %w", err)
+		}
+	}
+	controller := newProxyController(*proxyState, *proxyBinary)
+	defer controller.close()
 
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, proxyErr error) {
@@ -67,7 +83,23 @@ func run() error {
 	staticHandler := newSPAHandler(root)
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/proxy/status" {
-			proxyTests.status(w, r)
+			controller.serveStatus(w, r)
+			return
+		}
+		if r.URL.Path == "/api/proxy/config" {
+			controller.serveConfig(w, r)
+			return
+		}
+		if r.URL.Path == "/api/proxy/connect" {
+			controller.serveConnect(w, r)
+			return
+		}
+		if r.URL.Path == "/api/proxy/disconnect" {
+			controller.serveDisconnect(w, r)
+			return
+		}
+		if r.URL.Path == "/api/proxy/reconnect" {
+			controller.serveReconnect(w, r)
 			return
 		}
 		if r.URL.Path == "/api/proxy/test" {
@@ -141,18 +173,6 @@ func (h proxyTestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	report := proxyTestReport{GeneratedAt: time.Now().UTC(), TCP: testTCPProxy(), UDP: testUDPRelay(), SystemDNS: h.testSystemDNS()}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(report)
-}
-
-func (h proxyTestHandler) status(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", http.MethodGet)
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
-		return
-	}
-	tcp := portListening("tcp", "127.0.0.1:47101")
-	udp := udpPortOccupied("127.0.0.1:47102")
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	_ = json.NewEncoder(w).Encode(map[string]any{"tcp_listener": tcp, "udp_listener": udp})
 }
 
 func portListening(network, address string) bool {

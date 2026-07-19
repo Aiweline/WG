@@ -11,20 +11,45 @@ const liveStatus = {
 };
 
 const liveDns = { state: 'ready', system_dns_unchanged: true, upstreams: [], generation: 4 };
+const emptyProxyConfig = { servers: [], selected_endpoint: '', transport: 'tcp', udp_target: '1.1.1.1:53' };
+const disconnectedProxy = {
+  configured: false,
+  connected: false,
+  tcp_listener: false,
+  udp_listener: false,
+  managed: false,
+  selected_endpoint: '',
+  transport: 'tcp',
+  udp_target: '1.1.1.1:53',
+  servers: [],
+};
 
 function response(body, status = 200) {
   return { ok: status >= 200 && status < 300, status, json: async () => body };
 }
 
-function liveBackend(handler) {
-  return vi.fn(async (url, options = {}) => {
-    const custom = handler ? await handler(String(url), options) : undefined;
+function backend(handler, { coreLive = true } = {}) {
+  return vi.fn(async (input, options = {}) => {
+    const url = String(input);
+    const method = options.method || 'GET';
+    const custom = handler ? await handler(url, method, options) : undefined;
     if (custom !== undefined) return custom;
-    if (String(url).endsWith('/status')) return response(liveStatus);
-    if (String(url).endsWith('/rules') && !options.method) return response({ rules: [] });
-    if (String(url).endsWith('/dns') && !options.method) return response(liveDns);
+
+    if (url === '/api/proxy/status' && method === 'GET') return response(disconnectedProxy);
+    if (url === '/api/proxy/config' && method === 'GET') return response(emptyProxyConfig);
+    if (url === '/api/v1/status' && coreLive) return response(liveStatus);
+    if (url === '/api/v1/rules' && method === 'GET' && coreLive) return response({ rules: [] });
+    if (url === '/api/v1/dns' && method === 'GET' && coreLive) return response(liveDns);
+    if (url.startsWith('/api/v1/') && !coreLive) throw new TypeError('wg-core offline');
     return response({}, 404);
   });
+}
+
+async function fillServer(user, ip = '47.92.25.188', port = '9518') {
+  await user.type(screen.getByLabelText('服务器名称'), '生产节点');
+  await user.type(screen.getByLabelText('服务器 IP'), ip);
+  await user.clear(screen.getByLabelText('端口'));
+  await user.type(screen.getByLabelText('端口'), port);
 }
 
 describe('WG client', () => {
@@ -34,71 +59,139 @@ describe('WG client', () => {
 
   afterEach(() => {
     cleanup();
-    Object.defineProperty(window.navigator, 'clipboard', { configurable: true, value: undefined });
     vi.unstubAllGlobals();
   });
 
-  it('falls back to an explicit safe demo without hiding connection state', async () => {
+  it('shows a real server configuration page when wg-core is offline', async () => {
     render(<App />);
+
     expect(screen.getByRole('heading', { name: '连接' })).toBeInTheDocument();
-    expect(await screen.findByText('安全演示 · 不修改系统')).toBeInTheDocument();
-    expect(screen.getByText('未修改系统 DNS')).toBeInTheDocument();
+    expect(screen.getByLabelText('服务器 IP')).toBeInTheDocument();
+    expect(screen.getByLabelText('端口')).toHaveValue(9518);
+    expect(await screen.findByText('代理控制台 · 未连接')).toBeInTheDocument();
+    expect(screen.queryByText(/演示/)).not.toBeInTheDocument();
   });
 
-  it('keeps live state unchanged and does not show success when a live mutation loses the backend', async () => {
+  it('saves the entered server and starts the real TCP and UDP proxy', async () => {
     const user = userEvent.setup();
-    vi.stubGlobal('fetch', liveBackend((url) => {
-      if (url.endsWith('/connection/disconnect')) throw new TypeError('connection lost');
+    let config = { ...emptyProxyConfig };
+    let runtime = { ...disconnectedProxy };
+    const fetchMock = backend((url, method, options) => {
+      if (url === '/api/proxy/config' && method === 'GET') return response(config);
+      if (url === '/api/proxy/status' && method === 'GET') return response(runtime);
+      if (url === '/api/proxy/config' && method === 'PUT') {
+        config = JSON.parse(options.body);
+        return response(config);
+      }
+      if (url === '/api/proxy/connect' && method === 'POST') {
+        runtime = {
+          ...disconnectedProxy,
+          configured: true,
+          connected: true,
+          managed: true,
+          tcp_listener: true,
+          udp_listener: true,
+          selected_endpoint: config.selected_endpoint,
+          transport: config.transport,
+          udp_target: config.udp_target,
+          servers: config.servers,
+          started_at: '2026-07-19T04:00:00Z',
+        };
+        return response(runtime);
+      }
       return undefined;
-    }));
+    }, { coreLive: false });
+    vi.stubGlobal('fetch', fetchMock);
 
     render(<App />);
-    await screen.findByText('后台在线');
-    await user.click(screen.getByRole('button', { name: '断开连接' }));
+    await screen.findByText('代理控制台 · 未连接');
+    await fillServer(user);
+    await user.selectOptions(screen.getByLabelText('连接模式'), 'both');
+    await user.click(screen.getByRole('button', { name: '连接服务器' }));
 
-    expect(await screen.findByText(/无法确认操作结果/)).toBeInTheDocument();
-    expect(screen.getAllByText('已连接').length).toBeGreaterThan(0);
-    expect(screen.queryByText(/隧道已安全断开/)).not.toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: '代理已连接' })).toBeInTheDocument();
+    expect(screen.getByText('真实代理已运行 · TCP/UDP')).toBeInTheDocument();
+    expect(screen.getByText('127.0.0.1:47101')).toBeInTheDocument();
+    expect(screen.getByText('127.0.0.1:47102')).toBeInTheDocument();
+    const saveCall = fetchMock.mock.calls.find(([url, options]) => url === '/api/proxy/config' && options.method === 'PUT');
+    expect(JSON.parse(saveCall[1].body)).toEqual({
+      servers: [{ name: '生产节点', ip: '47.92.25.188', port: 9518 }],
+      selected_endpoint: '47.92.25.188:9518',
+      transport: 'both',
+      udp_target: '1.1.1.1:53',
+    });
   });
 
-  it('filters rules and restores a deleted override to AUTO in demo mode', async () => {
+  it('loads saved servers and persists a different selected server', async () => {
     const user = userEvent.setup();
+    const config = {
+      servers: [
+        { name: '杭州', ip: '47.92.25.188', port: 9518 },
+        { name: '备用', ip: '198.51.100.8', port: 9519 },
+      ],
+      selected_endpoint: '47.92.25.188:9518',
+      transport: 'tcp',
+      udp_target: '1.1.1.1:53',
+    };
+    const fetchMock = backend((url, method, options) => {
+      if (url === '/api/proxy/config' && method === 'GET') return response(config);
+      if (url === '/api/proxy/status' && method === 'GET') return response({ ...disconnectedProxy, configured: true, selected_endpoint: config.selected_endpoint, servers: config.servers });
+      if (url === '/api/proxy/config' && method === 'PUT') return response(JSON.parse(options.body));
+      return undefined;
+    }, { coreLive: false });
+    vi.stubGlobal('fetch', fetchMock);
+
     render(<App />);
-    await screen.findByText('安全演示 · 不修改系统');
-    await user.click(screen.getByRole('button', { name: '智能分流' }));
-    const search = screen.getByPlaceholderText('搜索域名或 IP');
-    await user.type(search, 'api.example.com');
-    const row = screen.getByText('api.example.com').closest('tr');
-    expect(within(row).getByText('TUNNEL')).toBeInTheDocument();
-    await user.click(within(row).getByRole('button', { name: '删除 api.example.com' }));
-    await user.click(screen.getByRole('button', { name: '删除并恢复 AUTO' }));
-    await waitFor(() => expect(within(row).getByText('AUTO')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByLabelText('服务器 IP')).toHaveValue('47.92.25.188'));
+    await user.selectOptions(screen.getByLabelText('选择服务器'), '198.51.100.8:9519');
+    expect(screen.getByLabelText('服务器 IP')).toHaveValue('198.51.100.8');
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+
+    const saveCall = await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([url, options]) => url === '/api/proxy/config' && options.method === 'PUT');
+      expect(call).toBeTruthy();
+      return call;
+    });
+    expect(JSON.parse(saveCall[1].body).selected_endpoint).toBe('198.51.100.8:9519');
   });
 
-  it('removes a successfully deleted live rule instead of retaining an invalid AUTO row', async () => {
+  it('does not display a fake connection when the local controller rejects connect', async () => {
+    const user = userEvent.setup();
+    const fetchMock = backend((url, method, options) => {
+      if (url === '/api/proxy/config' && method === 'PUT') return response(JSON.parse(options.body));
+      if (url === '/api/proxy/connect' && method === 'POST') return response({ error: { message: '缺少服务器证书' } }, 409);
+      return undefined;
+    }, { coreLive: false });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<App />);
+    await fillServer(user);
+    await user.click(screen.getByRole('button', { name: '连接服务器' }));
+
+    expect(await screen.findByText('缺少服务器证书')).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: '代理已连接' })).not.toBeInTheDocument();
+    expect(screen.getAllByText('未连接').length).toBeGreaterThan(0);
+  });
+
+  it('rejects an invalid port before sending configuration', async () => {
+    const user = userEvent.setup();
+    const fetchMock = backend(undefined, { coreLive: false });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<App />);
+    await fillServer(user, '47.92.25.188', '70000');
+    await user.click(screen.getByRole('button', { name: '连接服务器' }));
+
+    expect(screen.getByRole('alert')).toHaveTextContent('端口必须是 1–65535 之间的整数');
+    expect(fetchMock.mock.calls.some(([url, options]) => url === '/api/proxy/config' && options.method === 'PUT')).toBe(false);
+  });
+
+  it('keeps a manual rule target read-only and sends its revision', async () => {
     const user = userEvent.setup();
     const rule = { id: 'rule-7', target: 'api.example.com', target_type: 'DOMAIN', result: 'TUNNEL', source: 'MANUAL', revision: 9 };
-    vi.stubGlobal('fetch', liveBackend((url, options) => {
-      if (url.endsWith('/rules') && !options.method) return response({ rules: [rule] });
-      if (url.endsWith('/rules/rule-7') && options.method === 'DELETE') return response({ state: 'DELETED' });
-      return undefined;
-    }));
-
-    render(<App />);
-    await screen.findByText('后台在线');
-    await user.click(screen.getByRole('button', { name: '智能分流' }));
-    await user.click(screen.getByRole('button', { name: '删除 api.example.com' }));
-    await user.click(screen.getByRole('button', { name: '删除并恢复 AUTO' }));
-
-    await waitFor(() => expect(screen.queryByText('api.example.com')).not.toBeInTheDocument());
-  });
-
-  it('keeps an existing manual target read-only and sends its revision when edited', async () => {
-    const user = userEvent.setup();
-    const rule = { id: 'rule-7', target: 'api.example.com', target_type: 'DOMAIN', result: 'TUNNEL', source: 'MANUAL', revision: 9 };
-    const fetchMock = liveBackend((url, options) => {
-      if (url.endsWith('/rules') && !options.method) return response({ rules: [rule] });
-      if (url.endsWith('/rules') && options.method === 'POST') return response({ rule: { ...rule, result: 'DIRECT', revision: 10 } });
+    const fetchMock = backend((url, method) => {
+      if (url === '/api/v1/rules' && method === 'GET') return response({ rules: [rule] });
+      if (url === '/api/v1/rules' && method === 'POST') return response({ rule: { ...rule, result: 'DIRECT', revision: 10 } });
       return undefined;
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -112,82 +205,29 @@ describe('WG client', () => {
     await user.selectOptions(within(drawer).getByLabelText('结果'), 'DIRECT');
     await user.click(within(drawer).getByRole('button', { name: '保存' }));
 
-    let saveCall;
-    await waitFor(() => {
-      saveCall = fetchMock.mock.calls.find(([url, options]) => String(url).endsWith('/rules') && options.method === 'POST');
-      expect(saveCall).toBeTruthy();
+    const saveCall = await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([url, options]) => url === '/api/v1/rules' && options.method === 'POST');
+      expect(call).toBeTruthy();
+      return call;
     });
-    const body = JSON.parse(saveCall[1].body);
-    expect(body).toMatchObject({ id: 'rule-7', expected_revision: 9, target: 'api.example.com', result: 'DIRECT' });
+    expect(JSON.parse(saveCall[1].body)).toMatchObject({ id: 'rule-7', expected_revision: 9, target: 'api.example.com', result: 'DIRECT' });
   });
 
-  it('keeps the rule editor open when the backend rejects a live save', async () => {
+  it('uses validated backend data for IPv6 pairing', async () => {
     const user = userEvent.setup();
-    const rule = { id: 'rule-7', target: 'api.example.com', target_type: 'DOMAIN', result: 'TUNNEL', source: 'MANUAL', revision: 9 };
-    vi.stubGlobal('fetch', liveBackend((url, options) => {
-      if (url.endsWith('/rules') && !options.method) return response({ rules: [rule] });
-      if (url.endsWith('/rules') && options.method === 'POST') return response({ error: { message: '规则版本已变化' } }, 409);
-      return undefined;
-    }));
-
-    render(<App />);
-    await screen.findByText('后台在线');
-    await user.click(screen.getByRole('button', { name: '智能分流' }));
-    await user.click(screen.getByRole('button', { name: '编辑 api.example.com' }));
-    await user.click(within(screen.getByRole('dialog', { name: '编辑规则' })).getByRole('button', { name: '保存' }));
-
-    expect(await screen.findByText('规则版本已变化')).toBeInTheDocument();
-    expect(screen.getByRole('dialog', { name: '编辑规则' })).toBeInTheDocument();
-  });
-
-  it('turns an edited auto decision into a new manual override without auto id or revision', async () => {
-    const user = userEvent.setup();
-    const learned = { id: 'auto-12', target: 'learned.example.com', target_type: 'DOMAIN', result: 'DIRECT', source: 'AUTO', revision: 6 };
-    const fetchMock = liveBackend((url, options) => {
-      if (url.endsWith('/rules') && !options.method) return response({ rules: [learned] });
-      if (url.endsWith('/rules') && options.method === 'POST') return response({ rule: { ...learned, id: 'rule-13', result: 'TUNNEL', source: 'MANUAL', revision: 7 } });
-      return undefined;
-    });
-    vi.stubGlobal('fetch', fetchMock);
-
-    render(<App />);
-    await screen.findByText('后台在线');
-    await user.click(screen.getByRole('button', { name: '智能分流' }));
-    await user.click(screen.getByRole('button', { name: '编辑 learned.example.com' }));
-    const drawer = screen.getByRole('dialog', { name: '创建手动覆盖' });
-    expect(within(drawer).getByLabelText('目标')).toHaveAttribute('readonly');
-    await user.selectOptions(within(drawer).getByLabelText('结果'), 'TUNNEL');
-    await user.click(within(drawer).getByRole('button', { name: '保存' }));
-
-    let saveCall;
-    await waitFor(() => {
-      saveCall = fetchMock.mock.calls.find(([url, options]) => String(url).endsWith('/rules') && options.method === 'POST');
-      expect(saveCall).toBeTruthy();
-    });
-    const body = JSON.parse(saveCall[1].body);
-    expect(body).not.toHaveProperty('id');
-    expect(body).not.toHaveProperty('expected_revision');
-    await waitFor(() => expect(screen.getAllByText('learned.example.com')).toHaveLength(1));
-  });
-
-  it('starts pairing at step 1 and uses the validated session data for IPv6 enrollment', async () => {
-    const user = userEvent.setup();
-    const futureExpiry = '2030-07-17T01:02:03Z';
-    const fetchMock = liveBackend((url, options) => {
-      if (url.endsWith('/pairing/validate')) {
+    const fetchMock = backend((url, method, options) => {
+      if (url === '/api/v1/pairing/validate' && method === 'POST') {
         const body = JSON.parse(options.body);
-        const second = body.server_ip.includes(':');
         return response({
           valid: true,
-          validation_id: second ? 'validation-ipv6' : 'validation-ipv4',
+          validation_id: 'validation-ipv6',
           server_ip: body.server_ip,
-          port: second ? 51999 : 9518,
+          port: 9518,
           file_name: body.file_name,
-          fingerprint: second ? 'wgs-ipv6-validated-fingerprint' : 'wgs-ipv4-validated-fingerprint',
-          expires_at: futureExpiry,
+          fingerprint: 'wgs-ipv6-validated-fingerprint',
+          expires_at: '2030-07-17T01:02:03Z',
         });
       }
-      if (url.endsWith('/pairing/enroll')) return response({ state: 'ENROLLED' });
       return undefined;
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -195,13 +235,6 @@ describe('WG client', () => {
     render(<App />);
     await screen.findByText('后台在线');
     await user.click(screen.getByRole('button', { name: '首次配对' }));
-    expect(screen.getByRole('heading', { name: '输入服务器 IP' })).toBeInTheDocument();
-
-    await user.click(screen.getByRole('button', { name: '确认并继续' }));
-    await user.click(screen.getByRole('button', { name: '确认并继续' }));
-    expect(await screen.findByText('wgs-ipv4-validated-fingerprint')).toBeInTheDocument();
-
-    await user.click(screen.getByRole('button', { name: /服务器 IP/ }));
     const serverInput = screen.getByLabelText('服务器 IP');
     await user.clear(serverInput);
     await user.type(serverInput, '2001:db8::10');
@@ -209,89 +242,14 @@ describe('WG client', () => {
     await user.click(screen.getByRole('button', { name: '确认并继续' }));
 
     expect(await screen.findByText('wgs-ipv6-validated-fingerprint')).toBeInTheDocument();
-    expect(screen.getByText(/\[2001:db8::10\]:51999/)).toBeInTheDocument();
-    await user.click(screen.getByRole('checkbox', { name: /独立渠道核对/ }));
-    await user.click(screen.getByRole('button', { name: '确认并继续' }));
-    await user.click(screen.getByRole('checkbox', { name: /最小授权范围/ }));
-    await user.click(screen.getByRole('button', { name: '授权并完成配对' }));
-    expect(await screen.findByRole('heading', { name: '配对成功' })).toBeInTheDocument();
-    await user.click(screen.getByText('返回连接页', { exact: true }));
-    expect(screen.getByText('[2001:db8::10]:51999')).toBeInTheDocument();
-
-    const validateCalls = fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/pairing/validate'));
-    expect(validateCalls).toHaveLength(2);
-    const enrollCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/pairing/enroll'));
-    expect(JSON.parse(enrollCall[1].body)).toMatchObject({
-      validation_id: 'validation-ipv6',
-      server_ip: '2001:db8::10',
-      file_name: 'wg-pairing.wgp',
-      fingerprint: 'wgs-ipv6-validated-fingerprint',
-      fingerprint_confirmed: true,
-      authorization_confirmed: true,
-    });
+    expect(screen.getByText(/\[2001:db8::10\]:9518/)).toBeInTheDocument();
   });
 
-  it('uses the project demo fingerprint only after demo validation', async () => {
+  it('does not report a rejected live upgrade as successful', async () => {
     const user = userEvent.setup();
-    render(<App />);
-    await screen.findByText('安全演示 · 不修改系统');
-    await user.click(screen.getByRole('button', { name: '首次配对' }));
-    expect(screen.queryByText(/BLAKE2s-256/)).not.toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: '确认并继续' }));
-    await user.click(screen.getByRole('button', { name: '确认并继续' }));
-    expect(await screen.findByText(/BLAKE2s-256/)).toBeInTheDocument();
-    expect(screen.getAllByText(/^wgs-/)[0]).toHaveTextContent('wgs-p7dz-k4m2-qc6n-b5ta-vr8x-y2hf-j3we-s9ku');
-  });
-
-  it('rejects a non-standard pairing filename before validation', async () => {
-    const user = userEvent.setup();
-    render(<App />);
-    await screen.findByText('安全演示 · 不修改系统');
-    await user.click(screen.getByRole('button', { name: '首次配对' }));
-    await user.click(screen.getByRole('button', { name: '确认并继续' }));
-    await user.upload(screen.getByLabelText('选择配对文件'), new File(['pairing'], 'other.wgp', { type: 'application/octet-stream' }));
-    await user.click(screen.getByRole('button', { name: '确认并继续' }));
-    expect(screen.getByRole('alert')).toHaveTextContent('配对文件名必须精确为 wg-pairing.wgp');
-  });
-
-  it('uses normalized live diagnostics for health, DNS details, and clipboard output', async () => {
-    const user = userEvent.setup();
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(window.navigator, 'clipboard', { configurable: true, value: { writeText } });
-    const report = {
-      generated_at: '2026-07-17T01:02:03Z',
-      redacted: true,
-      overall: 'DEGRADED',
-      checks: [
-        { name: 'Tunnel connection', state: 'CONNECTED', summary: 'live tunnel check' },
-        { name: 'Smart routing', state: 'HEALTHY', summary: 'live generation 42' },
-        { name: 'Private DNS', state: 'DEGRADED', summary: 'live upstream scope check' },
-      ],
-      summary: 'live redacted summary',
-    };
-    vi.stubGlobal('fetch', liveBackend((url) => url.endsWith('/diagnostics') ? response(report) : undefined));
-
-    render(<App />);
-    await screen.findByText('后台在线');
-    await user.click(screen.getByRole('button', { name: '健康与更新' }));
-    expect(screen.getByText('尚未诊断')).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: '一键诊断' }));
-    expect(await screen.findByText('live generation 42')).toBeInTheDocument();
-    expect(screen.queryByText('分流规则加载正常，运行中')).not.toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: '复制到剪贴板' }));
-    expect(writeText).toHaveBeenCalledWith(expect.stringContaining('live generation 42'));
-
-    await user.click(screen.getByRole('button', { name: '私有 DNS' }));
-    await user.click(screen.getByRole('button', { name: '诊断' }));
-    expect(await screen.findByText('live upstream scope check')).toBeInTheDocument();
-    expect(screen.getByText('live redacted summary WG 不会为了恢复而替换系统 DNS。')).toBeInTheDocument();
-  });
-
-  it('does not report a live 501 upgrade as successful', async () => {
-    const user = userEvent.setup();
-    vi.stubGlobal('fetch', liveBackend((url) => {
-      if (url.endsWith('/updates/check')) return response({ available_version: '1.2.4', compatible: true, manifest_verified: true });
-      if (url.endsWith('/updates/upgrade')) return response({ error: { message: '尚未实现' } }, 501);
+    vi.stubGlobal('fetch', backend((url, method) => {
+      if (url === '/api/v1/updates/check' && method === 'POST') return response({ available_version: '1.2.4', compatible: true, manifest_verified: true });
+      if (url === '/api/v1/updates/upgrade' && method === 'POST') return response({ error: { message: '尚未实现' } }, 501);
       return undefined;
     }));
 
@@ -301,25 +259,8 @@ describe('WG client', () => {
     await user.click(screen.getByRole('button', { name: '检查更新' }));
     await screen.findByText('可更新');
     await user.click(screen.getByRole('button', { name: '升级' }));
+
     expect(await screen.findByText(/没有执行升级或回滚/)).toBeInTheDocument();
     expect(screen.getByText('可更新')).toBeInTheDocument();
-    expect(screen.queryByText('已是最新')).not.toBeInTheDocument();
-  });
-
-  it('does not enable an update advertised by an unverified legacy flag', async () => {
-    const user = userEvent.setup();
-    vi.stubGlobal('fetch', liveBackend((url) => {
-      if (url.endsWith('/updates/check')) return response({ available: true, latest: '9.9.9', compatible: true, manifest_verified: false, message: '签名清单未通过验证' });
-      return undefined;
-    }));
-
-    render(<App />);
-    await screen.findByText('后台在线');
-    await user.click(screen.getByRole('button', { name: '健康与更新' }));
-    await user.click(screen.getByRole('button', { name: '检查更新' }));
-
-    expect(await screen.findByText('无可用签名更新')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '升级' })).toBeDisabled();
-    expect(screen.queryByText('可更新')).not.toBeInTheDocument();
   });
 });

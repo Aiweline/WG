@@ -54,16 +54,17 @@ function expiryLabel(value) {
 }
 
 async function request(path, options = {}) {
+  const { timeoutMs = 1800, ...fetchOptions } = options;
   const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), 1800);
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
   let response;
   try {
     response = await fetch(path.startsWith('/api/') ? path : API_ROOT + path, {
-      ...options,
+      ...fetchOptions,
       headers: {
         Accept: 'application/json',
-        ...(options.body ? { 'Content-Type': 'application/json' } : {}),
-        ...options.headers,
+        ...(fetchOptions.body ? { 'Content-Type': 'application/json' } : {}),
+        ...fetchOptions.headers,
       },
       signal: controller.signal,
     });
@@ -257,7 +258,12 @@ export const api = {
   refreshDns: () => post('/dns/refresh').then((payload) => normalizeDns(payload?.dns || payload)),
   doctor: () => post('/diagnostics').then(normalizeDoctor),
   proxyStatus: () => request('/api/proxy/status'),
-  proxyTest: () => request('/api/proxy/test', { method: 'POST' }),
+  proxyConfig: () => request('/api/proxy/config'),
+  saveProxyConfig: (config) => request('/api/proxy/config', { method: 'PUT', body: JSON.stringify(config) }),
+  proxyConnect: () => request('/api/proxy/connect', { method: 'POST', timeoutMs: 10000 }),
+  proxyDisconnect: () => request('/api/proxy/disconnect', { method: 'POST', timeoutMs: 6000 }),
+  proxyReconnect: () => request('/api/proxy/reconnect', { method: 'POST', timeoutMs: 10000 }),
+  proxyTest: () => request('/api/proxy/test', { method: 'POST', timeoutMs: 20000 }),
   checkUpdate: () => post('/updates/check'),
   upgrade: () => post('/updates/upgrade'),
   rollback: () => post('/updates/rollback'),
