@@ -46,9 +46,9 @@ UDP requires an explicit `-target host:port`; it is suited to DNS, games, and ot
 | <code>internal/routing</code> | Domain, IP, and CIDR decisions using four routing states |
 | <code>internal/privatedns</code> | Read-only resolver snapshot, generation isolation, and private TTL cache |
 | <code>internal/controlapi</code> | Local management API with request-size, timeout, and concurrency limits |
-| <code>cmd</code> / <code>ui</code> / <code>scripts</code> | Safe core, five-page client UI, and dry-run development scripts |
+| <code>cmd</code> / <code>ui</code> / <code>scripts</code> | Safe control core, five-page client UI, and real TCP/UDP proxy scripts |
 
-These components validate the architecture and management workflow. They do not yet carry real tunnel traffic.
+The safe control-core components validate the architecture and management workflow. Real proxy traffic is carried by <code>wg-proxy</code>.
 
 ## Architecture
 
@@ -130,24 +130,22 @@ In safe mode, <code>--listen</code> is configuration data only and does not open
 
 ## WG Scripts
 
-The following commands are independent dry-run examples:
+For the real proxy data plane, build the binary and use the script switch:
 
 ~~~sh
-./scripts/wg-server install 203.0.113.10 --dry-run
+make build
+sudo WG_PROXY_BIN="$PWD/bin/wg-proxy" ./scripts/wg-server proxy install \
+  --server-ip YOUR_PUBLIC_IP --listen :9518
 
-./scripts/wg-server pair \
-  --output ./wg-pairing.wgp \
-  --expires 10m \
-  --dry-run
+./scripts/wg-client proxy start tcp \
+  --server SERVER_IP:9518 --ca ./server-cert.pem --token-file ./token
 
-./scripts/wg-client install \
-  203.0.113.10 \
-  ./wg-pairing.wgp \
-  --dry-run
+./scripts/wg-client proxy start udp \
+  --server SERVER_IP:9518 --target 1.1.1.1:53 --token-file ./token
 ~~~
 
 > [!IMPORTANT]
-> A dry-run is not guaranteed to create a pairing file. Real installation is unfinished, and <code>install --execute</code> intentionally fails; do not use these commands as production deployment steps.
+The proxy installer enables <code>wg-proxy-tcp.service</code> and <code>wg-proxy-udp.service</code>. It never changes DNS, routes, NAT, or firewall rules.
 
 ## Repository Layout
 

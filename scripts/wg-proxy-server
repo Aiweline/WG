@@ -1,0 +1,89 @@
+#!/bin/sh
+# Install and operate the real WG TCP + UDP data-plane services.
+set -eu
+
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+STATE_DIR=/etc/wg-proxy
+BIN=${WG_PROXY_BIN:-/usr/local/lib/wg-proxy/wg-proxy}
+LISTEN=${WG_PROXY_LISTEN:-:9518}
+
+die() { printf 'wg-proxy-server: %s\n' "$*" >&2; exit 2; }
+need_root() { [ "$(id -u)" -eq 0 ] || die 'run this command as root'; }
+
+usage() {
+    cat <<'EOF'
+Usage:
+  wg-proxy-server install --server-ip IP [--listen ADDRESS] [--binary PATH]
+  wg-proxy-server start|stop|restart|status|logs
+
+install creates /etc/wg-proxy/{token,server-cert.pem,server-key.pem}, installs
+two system services, and starts TCP/9518 plus UDP/9518. No DNS, route, NAT,
+or firewall rule is modified. Set --listen to a private interface address when
+the same port is already used on 127.0.0.1 by another local service.
+EOF
+}
+
+install_service() {
+    server_ip=$1
+    need_root
+    [ -x "$BIN" ] || die "WG_PROXY_BIN is not executable: $BIN"
+    command -v openssl >/dev/null 2>&1 || die 'openssl is required to create the TLS certificate'
+    mkdir -p "$STATE_DIR" /usr/local/lib/wg-proxy
+    if [ "$BIN" != /usr/local/lib/wg-proxy/wg-proxy ]; then
+        cp "$BIN" /usr/local/lib/wg-proxy/wg-proxy
+        BIN=/usr/local/lib/wg-proxy/wg-proxy
+    fi
+    chmod 0755 "$BIN"
+    if [ ! -s "$STATE_DIR/token" ]; then
+        umask 077
+        openssl rand -hex 32 > "$STATE_DIR/token"
+    fi
+    if [ ! -s "$STATE_DIR/server-cert.pem" ] || [ ! -s "$STATE_DIR/server-key.pem" ]; then
+        openssl req -x509 -newkey rsa:3072 -nodes \
+            -keyout "$STATE_DIR/server-key.pem" -out "$STATE_DIR/server-cert.pem" \
+            -days 3650 -subj "/CN=$server_ip" -addext "subjectAltName=IP:$server_ip"
+    fi
+    chmod 0600 "$STATE_DIR/token" "$STATE_DIR/server-key.pem"
+    chmod 0644 "$STATE_DIR/server-cert.pem"
+    printf '%s\n' \
+        '[Unit]' 'Description=WG TLS TCP proxy' 'Wants=network-online.target' 'After=network-online.target' '' \
+        '[Service]' 'Type=simple' \
+        "ExecStart=$BIN server -listen $LISTEN -cert $STATE_DIR/server-cert.pem -key $STATE_DIR/server-key.pem -token-file $STATE_DIR/token" \
+        'Restart=on-failure' 'RestartSec=3' 'NoNewPrivileges=true' 'PrivateTmp=true' '' \
+        '[Install]' 'WantedBy=multi-user.target' > /etc/systemd/system/wg-proxy-tcp.service
+    printf '%s\n' \
+        '[Unit]' 'Description=WG encrypted UDP relay' 'Wants=network-online.target' 'After=network-online.target' '' \
+        '[Service]' 'Type=simple' \
+        "ExecStart=$BIN udp-server -listen $LISTEN -token-file $STATE_DIR/token" \
+        'Restart=on-failure' 'RestartSec=3' 'NoNewPrivileges=true' 'PrivateTmp=true' '' \
+        '[Install]' 'WantedBy=multi-user.target' > /etc/systemd/system/wg-proxy-udp.service
+    systemctl daemon-reload
+    systemctl enable --now wg-proxy-tcp.service wg-proxy-udp.service
+	# Apply an updated ExecStart when install is run again.
+	systemctl restart wg-proxy-tcp.service wg-proxy-udp.service
+    printf 'WG is running: TCP and UDP on %s\n' "$LISTEN"
+    printf 'Client materials: %s/server-cert.pem and %s/token (transfer securely).\n' "$STATE_DIR" "$STATE_DIR"
+}
+
+command=${1:-help}
+[ "$#" -eq 0 ] || shift
+case "$command" in
+    help|-h|--help) usage ;;
+    install)
+        server_ip= listen_set=0
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+                --server-ip) shift; [ "$#" -gt 0 ] || die '--server-ip needs an IP'; server_ip=$1 ;;
+                --listen) shift; [ "$#" -gt 0 ] || die '--listen needs an address'; LISTEN=$1; listen_set=1 ;;
+                --binary) shift; [ "$#" -gt 0 ] || die '--binary needs a path'; BIN=$1 ;;
+                *) die "unknown install option: $1" ;;
+            esac
+            shift
+        done
+        [ -n "$server_ip" ] || die 'install requires --server-ip IP'
+        install_service "$server_ip"
+        ;;
+    start|stop|restart|status) need_root; systemctl "$command" wg-proxy-tcp.service wg-proxy-udp.service ;;
+    logs) need_root; exec journalctl -u wg-proxy-tcp.service -u wg-proxy-udp.service -f ;;
+    *) die "unknown command: $command" ;;
+esac

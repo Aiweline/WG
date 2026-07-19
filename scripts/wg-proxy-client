@@ -1,0 +1,76 @@
+#!/bin/sh
+# Start and stop local, loopback-only WG TCP or UDP proxy clients.
+set -eu
+
+PATH=/usr/local/bin:/usr/bin:/bin
+SCRIPT_DIR=$(CDPATH= cd -P "$(dirname "$0")" && pwd)
+ROOT_DIR=$(CDPATH= cd -P "$SCRIPT_DIR/.." && pwd)
+BIN=${WG_PROXY_BIN:-$ROOT_DIR/bin/wg-proxy}
+STATE_DIR=${WG_PROXY_STATE_DIR:-$ROOT_DIR/.wg-proxy}
+
+die() { printf 'wg-proxy-client: %s\n' "$*" >&2; exit 2; }
+usage() {
+    cat <<'EOF'
+Usage:
+  wg-proxy-client start tcp --server HOST:9518 --ca CERT --token-file TOKEN [--listen 127.0.0.1:47101] [--direct-host SUFFIXES]
+  wg-proxy-client start udp --server HOST:9518 --target HOST:PORT --token-file TOKEN [--listen 127.0.0.1:47102]
+  wg-proxy-client stop tcp|udp
+  wg-proxy-client status
+
+The TCP client is an HTTP/HTTPS proxy. The UDP client is a loopback relay for
+the one explicit --target. Neither command changes system DNS or routes.
+EOF
+}
+pid_file() { printf '%s/%s.pid' "$STATE_DIR" "$1"; }
+start_client() {
+    mode=$1; shift
+    [ -x "$BIN" ] || die "WG_PROXY_BIN is not executable: $BIN"
+    mkdir -p "$STATE_DIR"
+    pid=$(pid_file "$mode")
+    if [ -f "$pid" ] && kill -0 "$(cat "$pid")" 2>/dev/null; then die "$mode client is already running"; fi
+    rm -f "$pid"
+    umask 077
+    nohup "$BIN" "$@" >"$STATE_DIR/$mode.log" 2>&1 &
+    client_pid=$!
+    printf '%s\n' "$client_pid" > "$pid"
+    sleep 1
+    kill -0 "$client_pid" 2>/dev/null || die "$mode client exited; inspect $STATE_DIR/$mode.log"
+    printf 'WG %s client started (PID %s).\n' "$mode" "$client_pid"
+}
+stop_client() {
+    mode=$1; pid=$(pid_file "$mode")
+    [ -f "$pid" ] || { printf 'WG %s client is stopped.\n' "$mode"; return; }
+    client_pid=$(cat "$pid")
+    case "$client_pid" in ''|*[!0-9]*) die "invalid pid file: $pid";; esac
+    kill "$client_pid" 2>/dev/null || true
+    rm -f "$pid"
+    printf 'WG %s client stopped.\n' "$mode"
+}
+
+command=${1:-help}; [ "$#" -eq 0 ] || shift
+case "$command" in
+    help|-h|--help) usage ;;
+    start)
+        mode=${1:-}; [ "$#" -gt 0 ] && shift || true
+        case "$mode" in
+            tcp)
+                listen=127.0.0.1:47101; server=; ca=; token=; direct=
+                while [ "$#" -gt 0 ]; do case "$1" in --listen) shift; listen=$1;; --server) shift; server=$1;; --ca) shift; ca=$1;; --token-file) shift; token=$1;; --direct-host) shift; direct=$1;; *) die "unknown TCP option: $1";; esac; shift; done
+                [ -n "$server" ] && [ -n "$ca" ] && [ -n "$token" ] || die 'TCP requires --server, --ca, and --token-file'
+                set -- client -listen "$listen" -server "$server" -ca "$ca" -token-file "$token"
+                [ -z "$direct" ] || set -- "$@" -direct-host "$direct"
+                start_client tcp "$@"
+                ;;
+            udp)
+                listen=127.0.0.1:47102; server=; target=; token=
+                while [ "$#" -gt 0 ]; do case "$1" in --listen) shift; listen=$1;; --server) shift; server=$1;; --target) shift; target=$1;; --token-file) shift; token=$1;; *) die "unknown UDP option: $1";; esac; shift; done
+                [ -n "$server" ] && [ -n "$target" ] && [ -n "$token" ] || die 'UDP requires --server, --target, and --token-file'
+                start_client udp udp-client -listen "$listen" -server "$server" -target "$target" -token-file "$token"
+                ;;
+            *) die 'start requires tcp or udp' ;;
+        esac
+        ;;
+    stop) mode=${1:-}; [ "$#" -eq 1 ] || die 'stop requires tcp or udp'; case "$mode" in tcp|udp) stop_client "$mode";; *) die 'stop requires tcp or udp';; esac ;;
+    status) for mode in tcp udp; do pid=$(pid_file "$mode"); if [ -f "$pid" ] && kill -0 "$(cat "$pid")" 2>/dev/null; then printf '%s: running (PID %s)\n' "$mode" "$(cat "$pid")"; else printf '%s: stopped\n' "$mode"; fi; done ;;
+    *) die "unknown command: $command" ;;
+esac

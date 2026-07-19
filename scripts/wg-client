@@ -21,6 +21,11 @@ esac
 
 CLIENT_MANAGEMENT_ADDR=${WG_CLIENT_MANAGEMENT_ADDR:-127.0.0.1:47003}
 
+if [ "${1:-}" = "proxy" ]; then
+    shift
+    exec "$SCRIPT_DIR/wg-proxy-client" "$@"
+fi
+
 die() {
     printf 'wg-client: %s\n' "$*" >&2
     exit 2

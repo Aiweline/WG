@@ -68,22 +68,26 @@ wg-proxy udp-client \
 
 ## 一键安装脚本
 
-以下命令均为安全开发模式的 dry-run 示例，不会创建真实 VPN、修改系统 DNS 或系统路由。
+以下是实际 TCP/UDP 数据面脚本；它们不会修改系统 DNS、路由、NAT 或防火墙。请先通过安全渠道将服务端证书和令牌提供给客户端。
 
 ### macOS / Linux 客户端
 
 ~~~sh
-curl -fsSLO https://raw.githubusercontent.com/Aiweline/WG/main/scripts/wg-client
-chmod +x ./wg-client
-./wg-client install 203.0.113.10 ./wg-pairing.wgp --dry-run
+make build
+./scripts/wg-client proxy start tcp \
+  --server SERVER_IP:9518 --ca ./server-cert.pem --token-file ./token
+
+# 切换为 UDP：暴露一个只连接到指定目标的本地 UDP 中继
+./scripts/wg-client proxy start udp \
+  --server SERVER_IP:9518 --target 1.1.1.1:53 --token-file ./token
 ~~~
 
 ### Linux 服务端
 
 ~~~sh
-curl -fsSLO https://raw.githubusercontent.com/Aiweline/WG/main/scripts/wg-server
-chmod +x ./wg-server
-./wg-server install 203.0.113.10 --dry-run
+make build
+sudo WG_PROXY_BIN="$PWD/bin/wg-proxy" ./scripts/wg-server proxy install \
+  --server-ip YOUR_PUBLIC_IP --listen :9518
 ~~~
 
 ### Windows（PowerShell）
@@ -94,7 +98,7 @@ Set-Location WG
 wsl bash ./scripts/wg-client install 203.0.113.10 ./wg-pairing.wgp --dry-run
 ~~~
 
-> 生产安装尚未完成；`install --execute` 会明确失败。请不要把上述示例用于生产网络。
+安装脚本会创建 `wg-proxy-tcp.service` 和 `wg-proxy-udp.service` 并设置开机自启。若 `127.0.0.1:9518` 已有本地服务，请将 `--listen` 指向服务器私网网卡地址，例如 `172.23.33.165:9518`。
 
 ## 核心特点
 
@@ -117,9 +121,9 @@ wsl bash ./scripts/wg-client install 203.0.113.10 ./wg-pairing.wgp --dry-run
 | <code>internal/routing</code> | 域名、IP、CIDR 与四类分流决策 |
 | <code>internal/privatedns</code> | 系统解析器只读快照、generation 隔离和私有 TTL 缓存 |
 | <code>internal/controlapi</code> | 有大小、超时和并发上限的本地管理 API |
-| <code>cmd</code> / <code>ui</code> / <code>scripts</code> | 安全 core、五页客户端 UI 和 dry-run 开发脚本 |
+| <code>cmd</code> / <code>ui</code> / <code>scripts</code> | 安全 control core、五页客户端 UI 和真实 TCP/UDP 代理脚本 |
 
-这些组件验证的是架构与管理流程，目前不承载真实隧道流量。
+安全 control core 验证架构与管理流程；<code>wg-proxy</code> 承载真实代理流量。
 
 ## 架构
 
