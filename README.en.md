@@ -85,7 +85,7 @@ WG_DEV_SAFE=1 ./bin/wg-core client \
   --dev-safe \
   --no-host-network \
   --management-address 127.0.0.1:47003 \
-  --endpoint 203.0.113.10:47001
+  --endpoint 203.0.113.10:9518
 ~~~
 
 <code>203.0.113.10</code> is a TEST-NET documentation address. The current build records the endpoint but does not establish a real tunnel.
@@ -108,7 +108,7 @@ WG_DEV_SAFE=1 ./bin/wg-core server \
   --dev-safe \
   --no-host-network \
   --management-address 127.0.0.1:47002 \
-  --listen 0.0.0.0:47001
+  --listen 0.0.0.0:9518
 ~~~
 
 In safe mode, <code>--listen</code> is configuration data only and does not open a UDP socket.
@@ -169,4 +169,3 @@ sh -n scripts/wg-server
 Issues and pull requests are welcome. Keep safe development mode as the default, add tests for behavioral changes, and run all validation commands before submitting.
 
 Changes to the protocol, cryptography, replay protection, routing, DNS, or system networking should document compatibility, security impact, and validation evidence.
-

@@ -11,7 +11,7 @@ import (
 
 func testService() *Service {
 	return NewService(Config{
-		Mode: "client", Endpoint: "203.0.113.10:47001",
+		Mode: "client", Endpoint: "203.0.113.10:9518",
 		InitialDNS: privatedns.Snapshot{Upstreams: []privatedns.Upstream{{Address: "223.5.5.5", Port: 53}}},
 	})
 }
@@ -57,7 +57,7 @@ func TestDeleteManualRuleRestoresAuto(t *testing.T) {
 func TestRuleExpiryRestoresAutoForActualDecisions(t *testing.T) {
 	now := time.Date(2026, 7, 16, 8, 0, 0, 0, time.UTC)
 	service := NewService(Config{
-		Mode: "client", Endpoint: "203.0.113.10:47001", Now: func() time.Time { return now },
+		Mode: "client", Endpoint: "203.0.113.10:9518", Now: func() time.Time { return now },
 		InitialDNS: privatedns.Snapshot{Upstreams: []privatedns.Upstream{{Address: "223.5.5.5", Port: 53}}},
 	})
 	expires := now.Add(time.Minute)

@@ -224,7 +224,7 @@ export function App() {
         valid: true,
         validationId: 'demo-validation-' + Date.now(),
         serverIp: payload.serverIp.trim(),
-        port: 47001,
+        port: 9518,
         fileName: payload.fileName,
         fingerprint: serverFingerprint,
         expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),

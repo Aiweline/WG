@@ -19,7 +19,7 @@ case "$SERVER_BIN" in
     *) SERVER_BIN="$ROOT_DIR/$SERVER_BIN" ;;
 esac
 
-SERVER_LISTEN_ADDR=${WG_SERVER_LISTEN_ADDR:-0.0.0.0:47001}
+SERVER_LISTEN_ADDR=${WG_SERVER_LISTEN_ADDR:-0.0.0.0:9518}
 SERVER_MANAGEMENT_ADDR=${WG_SERVER_MANAGEMENT_ADDR:-127.0.0.1:47002}
 
 die() {
@@ -55,7 +55,7 @@ Safety model:
 
 Environment:
   WG_SERVER_BIN              Project-local Go binary (default: bin/wg-core)
-  WG_SERVER_LISTEN_ADDR      UDP development listener (default: 0.0.0.0:47001)
+  WG_SERVER_LISTEN_ADDR      UDP development listener (default: 0.0.0.0:9518)
   WG_SERVER_MANAGEMENT_ADDR  Loopback management address (default: 127.0.0.1:47002)
   WG_SERVER_PUBLIC_IP        Public IP used by install dry-run output
 EOF

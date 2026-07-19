@@ -21,7 +21,7 @@
 
 ~~~sh
 wg-proxy server \
-  -listen :47001 \
+  -listen :9518 \
   -cert ./server-cert.pem \
   -key ./server-key.pem \
   -token "$WG_PROXY_TOKEN"
@@ -32,7 +32,7 @@ wg-proxy server \
 ~~~sh
 wg-proxy client \
   -listen 127.0.0.1:47101 \
-  -server SERVER_IP:47001 \
+  -server SERVER_IP:9518 \
   -ca ./server-cert.pem \
   -token "$WG_PROXY_TOKEN" \
   -direct-host example.com
@@ -145,7 +145,7 @@ WG_DEV_SAFE=1 ./bin/wg-core client \
   --dev-safe \
   --no-host-network \
   --management-address 127.0.0.1:47003 \
-  --endpoint 203.0.113.10:47001
+  --endpoint 203.0.113.10:9518
 ~~~
 
 <code>203.0.113.10</code> 是 TEST-NET 文档示例地址。当前版本只记录端点，不会建立真实隧道。
@@ -168,7 +168,7 @@ WG_DEV_SAFE=1 ./bin/wg-core server \
   --dev-safe \
   --no-host-network \
   --management-address 127.0.0.1:47002 \
-  --listen 0.0.0.0:47001
+  --listen 0.0.0.0:9518
 ~~~
 
 安全模式中的 <code>--listen</code> 只是配置记录，不会打开 UDP 端口。

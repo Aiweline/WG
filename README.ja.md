@@ -85,7 +85,7 @@ WG_DEV_SAFE=1 ./bin/wg-core client \
   --dev-safe \
   --no-host-network \
   --management-address 127.0.0.1:47003 \
-  --endpoint 203.0.113.10:47001
+  --endpoint 203.0.113.10:9518
 ~~~
 
 <code>203.0.113.10</code> は TEST-NET の文書用アドレスです。現行ビルドはエンドポイントを記録するだけで、実トンネルを確立しません。
@@ -108,7 +108,7 @@ WG_DEV_SAFE=1 ./bin/wg-core server \
   --dev-safe \
   --no-host-network \
   --management-address 127.0.0.1:47002 \
-  --listen 0.0.0.0:47001
+  --listen 0.0.0.0:9518
 ~~~
 
 安全モードの <code>--listen</code> は設定値を記録するだけで、UDP ソケットは開きません。
@@ -169,4 +169,3 @@ sh -n scripts/wg-server
 Issue と Pull Request を歓迎します。安全開発モードを既定値として維持し、動作変更にはテストを追加し、提出前にすべての検証コマンドを実行してください。
 
 プロトコル、暗号、リプレイ防止、分流、DNS、システムネットワークを変更する場合は、互換性、セキュリティ影響、検証根拠を Pull Request に記載してください。
-

@@ -43,7 +43,7 @@ func main() {
 
 func server(args []string) {
 	fs := flag.NewFlagSet("server", flag.ExitOnError)
-	listen := fs.String("listen", ":47001", "TLS listen address")
+	listen := fs.String("listen", ":9518", "TLS listen address")
 	cert := fs.String("cert", "", "PEM certificate path")
 	key := fs.String("key", "", "PEM private key path")
 	token := fs.String("token", "", "required proxy token")

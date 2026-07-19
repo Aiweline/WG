@@ -111,7 +111,7 @@ func parseOptions(arguments []string) (options, error) {
 	if mode == "server" {
 		defaultManagement = "127.0.0.1:47002"
 	}
-	value := options{mode: mode, managementAddress: defaultManagement, dataAddress: "0.0.0.0:47001", endpoint: "203.0.113.10:47001"}
+	value := options{mode: mode, managementAddress: defaultManagement, dataAddress: "0.0.0.0:9518", endpoint: "203.0.113.10:9518"}
 	flags := flag.NewFlagSet("wg-core "+mode, flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	flags.StringVar(&value.managementAddress, "management-address", value.managementAddress, "loopback development management address")

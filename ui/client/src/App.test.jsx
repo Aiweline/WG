@@ -181,7 +181,7 @@ describe('WG client', () => {
           valid: true,
           validation_id: second ? 'validation-ipv6' : 'validation-ipv4',
           server_ip: body.server_ip,
-          port: second ? 51999 : 47001,
+          port: second ? 51999 : 9518,
           file_name: body.file_name,
           fingerprint: second ? 'wgs-ipv6-validated-fingerprint' : 'wgs-ipv4-validated-fingerprint',
           expires_at: futureExpiry,

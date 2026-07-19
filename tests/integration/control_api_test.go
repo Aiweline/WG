@@ -14,7 +14,7 @@ import (
 
 func TestRuleLifecycleReturnsToAuto(t *testing.T) {
 	service := app.NewService(app.Config{
-		Mode: "client", Endpoint: "203.0.113.10:47001",
+		Mode: "client", Endpoint: "203.0.113.10:9518",
 		InitialDNS: privatedns.Snapshot{Upstreams: []privatedns.Upstream{{Address: "223.5.5.5", Port: 53}}},
 	})
 	server := httptest.NewServer(controlapi.NewServer(service, nil).Handler())

@@ -1047,7 +1047,7 @@ deployment_id = "HEX_16_BYTES"
 
 [endpoint]
 host = "203.0.113.10"
-port = 47001
+port = 9518
 transport = "udp"
 
 [tunnel]
@@ -1091,7 +1091,7 @@ deployment_id = "HEX_16_BYTES"
 [listener]
 addresses = ["0.0.0.0", "::"]
 advertise_address = "203.0.113.10"
-port = 47001
+port = 9518
 max_datagram_size = 1400
 
 [tunnel]

@@ -453,7 +453,7 @@ func (s *Service) ValidatePairing(_ context.Context, request controlapi.PairingV
 	}
 	s.mu.Unlock()
 	return controlapi.PairingValidation{
-		Valid: true, ValidationID: validationID, ServerIP: normalizedIP, Port: 47001,
+		Valid: true, ValidationID: validationID, ServerIP: normalizedIP, Port: 9518,
 		FileName: request.FileName, Fingerprint: demoFingerprint, ExpiresAt: expiresAt,
 		Message: "development validation only; production must inspect the 0600 file and verify its signed fields",
 	}, nil
@@ -497,7 +497,7 @@ func (s *Service) Enroll(_ context.Context, request controlapi.EnrollRequest) (c
 		return controlapi.OperationResponse{}, fmt.Errorf("%w: pairing inputs changed after validation", controlapi.ErrInvalidInput)
 	}
 	delete(s.pairingValidations, request.ValidationID)
-	s.endpoint = netip.AddrPortFrom(address, 47001).String()
+	s.endpoint = netip.AddrPortFrom(address, 9518).String()
 	s.revision++
 	response := controlapi.OperationResponse{OperationID: request.OperationID, Accepted: true, State: "COMPLETE", Revision: s.revision, Message: "development enrollment completed without consuming a real token or changing host networking"}
 	s.operations[operationKey] = response
