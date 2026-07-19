@@ -10,6 +10,36 @@
 > **当前仓库是安全开发基线，不是可投入生产的 VPN。**  
 > 现阶段不会创建 UDP 数据通道、TUN 设备、系统路由、防火墙或 NAT 规则，也不会转发真实流量。“填写服务器 IP 即可连接”是产品目标交互；当前版本用于验证协议组件、控制面、客户端界面与安全边界。
 
+## 实验性真实数据面
+
+仓库提供 `wg-proxy`，用于端到端验证真实流量：客户端只监听回环 HTTP 代理端口，使用 TLS 连接到服务端；服务端在认证后处理 HTTP 和 HTTPS CONNECT 请求并实际连接目标站点。客户端的 `-direct-host` 规则支持按域名后缀绕过隧道，整个过程不修改系统 DNS、路由或防火墙。
+
+> [!CAUTION]
+> 这是实验性 HTTP 代理数据面，不是完整 VPN/TUN 实现。生产部署仍需要正式的密钥生命周期、配置持久化、限流、审计与独立安全审计。
+
+服务端示例：
+
+~~~sh
+wg-proxy server \
+  -listen :47001 \
+  -cert ./server-cert.pem \
+  -key ./server-key.pem \
+  -token "$WG_PROXY_TOKEN"
+~~~
+
+客户端示例：
+
+~~~sh
+wg-proxy client \
+  -listen 127.0.0.1:47101 \
+  -server SERVER_IP:47001 \
+  -ca ./server-cert.pem \
+  -token "$WG_PROXY_TOKEN" \
+  -direct-host example.com
+
+curl --proxy http://127.0.0.1:47101 https://icanhazip.com
+~~~
+
 ## 一键安装脚本
 
 以下命令均为安全开发模式的 dry-run 示例，不会创建真实 VPN、修改系统 DNS 或系统路由。
